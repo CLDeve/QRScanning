@@ -406,7 +406,8 @@ def api_export_csv():
 def main():
     init_db()
     port = int(os.environ.get("PORT", "5053"))
-    app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
+    host = os.environ.get("HOST", "0.0.0.0")
+    app.run(host=host, port=port, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":

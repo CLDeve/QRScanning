@@ -1,32 +1,22 @@
 # QR Scanner App
 
-Simple local web app for QR scanning only.
+Simple web app for QR scanning only.
 
 ## Features
 
 - Camera-based QR scan in browser
-- Manual QR text submission fallback
+- Manual QR text fallback
 - Scan history saved in SQLite
 - CSV export of scan logs
 
-## Data store
-
-- SQLite file: `qr_scans.db`
-
-## Setup
+## Local Run
 
 ```bash
-cd "/Users/charlesliew/Desktop/Certis/CAS/NFC Reader"
-rm -rf .venv
-/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12 -m venv .venv
+git clone https://github.com/CLDeve/QRScanning.git
+cd QRScanning
+python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
 pip install -r requirements.txt
-```
-
-## Run
-
-```bash
 PORT=5053 python app.py
 ```
 
@@ -34,7 +24,35 @@ Open:
 
 - `http://127.0.0.1:5053`
 
-## Notes
+## Deploy on Render (for phone testing)
 
-- Browser camera scan requires `BarcodeDetector` support (Chrome recommended).
-- If camera scan is unavailable, use manual text submission.
+This repo includes `render.yaml` and is ready for Render deploy.
+
+1. Go to https://render.com and sign in.
+2. Click `New +` -> `Blueprint`.
+3. Connect your GitHub account and select repo `CLDeve/QRScanning`.
+4. Confirm deploy.
+
+Render will use:
+
+- Build: `pip install -r requirements.txt`
+- Start: `gunicorn app:app`
+
+After deploy, Render gives an HTTPS URL like:
+
+- `https://qr-scanner-xxxx.onrender.com`
+
+Use that URL on your phone.
+
+## Phone Camera Notes
+
+- Use Chrome/Safari latest version.
+- Grant camera permission when prompted.
+- HTTPS is required for camera access (Render URL is HTTPS).
+- If camera scan is unavailable on your phone browser, use manual text input fallback.
+
+## Data Store
+
+- SQLite file: `qr_scans.db`
+
+Note: On free cloud hosting, SQLite may reset when the service restarts.
