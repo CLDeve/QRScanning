@@ -127,10 +127,18 @@ INDEX_TEMPLATE = """
     }
     video {
       width: 100%;
-      max-height: 340px;
+      height: min(70vh, 640px);
+      min-height: 420px;
       background: #111827;
       border-radius: 12px;
       margin-top: 10px;
+      object-fit: contain;
+    }
+    @media (max-width: 700px) {
+      video {
+        height: 62vh;
+        min-height: 360px;
+      }
     }
     #qr-canvas {
       display: none;
