@@ -176,22 +176,31 @@ INDEX_TEMPLATE = """
       border-radius: 28px;
       box-shadow: 0 0 0 999vmax rgba(2, 6, 23, 0.34);
     }
-    .scan-zone::after {
-      content: "";
-      position: absolute;
-      left: 6%;
-      right: 6%;
-      top: 8%;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.95), transparent);
-      animation: sweep 2s linear infinite;
-    }
     .corner {
       position: absolute;
       width: 56px;
       height: 56px;
       border: 4px solid #fff;
       opacity: 0.88;
+    }
+    .detected-chip {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      min-width: 150px;
+      max-width: 82%;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.9);
+      color: #f8fafc;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      text-align: center;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      padding: 10px 24px;
+      overflow-wrap: anywhere;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
     }
     .corner.tl {
       left: 0;
@@ -246,6 +255,12 @@ INDEX_TEMPLATE = """
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
     }
+    .capture-row {
+      margin-top: 8px;
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 8px;
+    }
     button {
       border: 1px solid var(--line);
       border-radius: 999px;
@@ -261,8 +276,15 @@ INDEX_TEMPLATE = """
       border-color: rgba(74, 222, 128, 0.7);
       background: linear-gradient(180deg, rgba(34, 197, 94, 0.85), rgba(22, 163, 74, 0.86));
     }
+    button.capture {
+      border-color: rgba(134, 239, 172, 0.9);
+      background: linear-gradient(180deg, rgba(34, 197, 94, 0.95), rgba(22, 163, 74, 0.96));
+    }
     button.ghost {
       background: var(--button-soft);
+    }
+    .hidden {
+      display: none;
     }
     .manual {
       display: grid;
@@ -362,20 +384,6 @@ INDEX_TEMPLATE = """
       margin-right: 6px;
       vertical-align: middle;
     }
-    @keyframes sweep {
-      0% {
-        transform: translateY(0);
-        opacity: 0.2;
-      }
-      50% {
-        transform: translateY(280px);
-        opacity: 1;
-      }
-      100% {
-        transform: translateY(0);
-        opacity: 0.2;
-      }
-    }
     @keyframes pulse {
       0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.8); }
       50% { box-shadow: 0 0 0 9px rgba(34, 197, 94, 0); }
@@ -412,6 +420,7 @@ INDEX_TEMPLATE = """
       <span class="corner tr"></span>
       <span class="corner bl"></span>
       <span class="corner br"></span>
+      <div id="detected-chip" class="detected-chip hidden"></div>
     </div>
 
     <div class="bottom-overlay">
@@ -420,6 +429,10 @@ INDEX_TEMPLATE = """
         <button id="start-scan" class="primary" type="button">Start</button>
         <button id="stop-scan" class="ghost" type="button">Stop</button>
         <button id="toggle-manual" class="ghost" type="button">Manual</button>
+      </div>
+      <div class="capture-row">
+        <button id="capture-scan" class="capture hidden" type="button">Capture</button>
+        <button id="clear-detected" class="ghost hidden" type="button">Reset</button>
       </div>
 
       <form id="manual-form" class="manual collapsed">
@@ -447,10 +460,14 @@ INDEX_TEMPLATE = """
     const manualForm = document.getElementById('manual-form');
     const manualInput = document.getElementById('manual-text');
     const manualToggle = document.getElementById('toggle-manual');
+    const captureButton = document.getElementById('capture-scan');
+    const clearButton = document.getElementById('clear-detected');
+    const detectedChip = document.getElementById('detected-chip');
     let stream = null;
     let detector = null;
     let detectorMode = null;
     let scanning = false;
+    let pendingDetectedText = '';
     let lastSentText = '';
     let lastSentAt = 0;
 
@@ -472,6 +489,21 @@ INDEX_TEMPLATE = """
         .replaceAll("'", '&#39;');
     }
 
+    function setPendingDetection(text) {
+      pendingDetectedText = (text || '').trim();
+      const hasPending = Boolean(pendingDetectedText);
+      captureButton.classList.toggle('hidden', !hasPending);
+      clearButton.classList.toggle('hidden', !hasPending);
+      detectedChip.classList.toggle('hidden', !hasPending);
+
+      if (hasPending) {
+        detectedChip.textContent = pendingDetectedText;
+        setResult(`Detected: ${pendingDetectedText}. Tap Capture to submit.`);
+      } else {
+        detectedChip.textContent = '';
+      }
+    }
+
     async function refreshRows() {
       const res = await fetch('/api/scans?limit=400');
       if (!res.ok) return;
@@ -491,12 +523,12 @@ INDEX_TEMPLATE = """
     async function submitScan(qrText, source) {
       const payload = (qrText || '').trim();
       if (!payload) {
-        return;
+        return false;
       }
 
       const now = Date.now();
       if (payload === lastSentText && now - lastSentAt < 1600) {
-        return;
+        return false;
       }
 
       let res;
@@ -508,7 +540,7 @@ INDEX_TEMPLATE = """
         });
       } catch (err) {
         setResult(`Submit failed: ${err.message || err}`, true);
-        return;
+        return false;
       }
 
       let data = null;
@@ -524,13 +556,14 @@ INDEX_TEMPLATE = """
         const backendError = data && data.error ? data.error : '';
         const genericError = textBody || `Scan rejected (${res.status})`;
         setResult(backendError || genericError, true);
-        return;
+        return false;
       }
 
       lastSentText = payload;
       lastSentAt = now;
       setResult('Scan saved');
       await refreshRows();
+      return true;
     }
 
     async function detectQrFromFrame() {
@@ -565,9 +598,16 @@ INDEX_TEMPLATE = """
       }
 
       try {
+        if (pendingDetectedText) {
+          if (scanning) {
+            requestAnimationFrame(scanLoop);
+          }
+          return;
+        }
+
         const qrText = await detectQrFromFrame();
         if (qrText) {
-          await submitScan(qrText, 'CAMERA');
+          setPendingDetection(qrText);
         }
       } catch (_) {
         // keep loop alive
@@ -623,6 +663,7 @@ INDEX_TEMPLATE = """
 
       scanning = true;
       setScanningState(true);
+      setPendingDetection('');
       setResult(detectorMode === 'barcode' ? 'Camera scan started' : 'Camera scan started (fallback mode)');
       scanLoop();
     }
@@ -630,6 +671,7 @@ INDEX_TEMPLATE = """
     function stopCameraScan() {
       scanning = false;
       setScanningState(false);
+      setPendingDetection('');
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
         stream = null;
@@ -645,6 +687,21 @@ INDEX_TEMPLATE = """
       if (!manualForm.classList.contains('collapsed')) {
         manualInput.focus();
       }
+    });
+    captureButton.addEventListener('click', async () => {
+      if (!pendingDetectedText) {
+        setResult('No detected gate code yet.', true);
+        return;
+      }
+      const codeToSubmit = pendingDetectedText;
+      const ok = await submitScan(codeToSubmit, 'CAMERA');
+      if (ok) {
+        setPendingDetection('');
+      }
+    });
+    clearButton.addEventListener('click', () => {
+      setPendingDetection('');
+      setResult('Ready to detect next gate code');
     });
 
     manualForm.addEventListener('submit', async (event) => {
