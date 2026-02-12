@@ -1,4 +1,4 @@
-# QR Scanner App
+# Gate Scanner App
 
 Simple web app for QR scanning only.
 

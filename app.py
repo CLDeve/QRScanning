@@ -86,7 +86,7 @@ INDEX_TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>QR Scanner</title>
+  <title>Gate Scanner</title>
   <style>
     :root {
       --ink: #f8fafc;
@@ -402,7 +402,7 @@ INDEX_TEMPLATE = """
 
     <div class="top-overlay">
       <div class="topbar">
-        <h1>QR Scanner</h1>
+        <h1>Gate Scanner</h1>
         <div class="badge"><span class="badge-dot"></span>Live</div>
       </div>
     </div>
@@ -415,7 +415,7 @@ INDEX_TEMPLATE = """
     </div>
 
     <div class="bottom-overlay">
-      <div id="scan-result" class="result">Ready to scan</div>
+      <div id="scan-result" class="result">Ready to scan gate code</div>
       <div class="control-row">
         <button id="start-scan" class="primary" type="button">Start</button>
         <button id="stop-scan" class="ghost" type="button">Stop</button>
@@ -423,7 +423,7 @@ INDEX_TEMPLATE = """
       </div>
 
       <form id="manual-form" class="manual collapsed">
-        <input id="manual-text" placeholder="Manual QR text">
+        <input id="manual-text" placeholder="Manual gate code">
         <button type="submit">Submit</button>
       </form>
 
