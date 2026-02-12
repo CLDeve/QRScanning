@@ -9,7 +9,17 @@ from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
-DB_PATH = "qr_scans.db"
+
+def resolve_db_path() -> str:
+    configured = os.environ.get("DB_PATH", "").strip()
+    if configured:
+        return configured
+    if os.environ.get("RENDER", "").lower() == "true":
+        return "/tmp/qr_scans.db"
+    return "qr_scans.db"
+
+
+DB_PATH = resolve_db_path()
 
 app = Flask(__name__)
 
@@ -19,13 +29,18 @@ def utc_now_iso() -> str:
 
 
 def db_connect():
-    connection = sqlite3.connect(DB_PATH)
+    connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     return connection
 
 
 def init_db():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
     with db_connect() as connection:
+        connection.execute("PRAGMA busy_timeout=5000")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS scans (
@@ -264,15 +279,31 @@ INDEX_TEMPLATE = """
         return;
       }
 
-      const res = await fetch('/api/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qr_text: payload, source }),
-      });
-      const data = await res.json().catch(() => ({ error: 'Failed to submit' }));
+      let res;
+      try {
+        res = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ qr_text: payload, source }),
+        });
+      } catch (err) {
+        setResult(`Submit failed: ${err.message || err}`, true);
+        return;
+      }
+
+      let data = null;
+      let textBody = '';
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        data = await res.json().catch(() => null);
+      } else {
+        textBody = await res.text().catch(() => '');
+      }
 
       if (!res.ok) {
-        setResult(data.error || 'Scan rejected', true);
+        const backendError = data && data.error ? data.error : '';
+        const genericError = textBody || `Scan rejected (${res.status})`;
+        setResult(backendError || genericError, true);
         return;
       }
 
@@ -415,6 +446,8 @@ def api_scan():
         add_scan(qr_text, source)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
 
     return jsonify({"ok": True})
 
@@ -426,7 +459,10 @@ def api_scans():
     except ValueError:
         limit = 300
     limit = max(1, min(limit, 5000))
-    return jsonify(list_scans(limit=limit))
+    try:
+        return jsonify(list_scans(limit=limit))
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
 
 
 @app.route("/api/export.csv")
@@ -435,7 +471,10 @@ def api_export_csv():
     writer = csv.writer(output)
     writer.writerow(["id", "scanned_at_utc", "qr_text", "source"])
 
-    rows = list_scans(limit=200000)
+    try:
+        rows = list_scans(limit=200000)
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
     for row in reversed(rows):
         writer.writerow([row["id"], row["scanned_at_utc"], row["qr_text"], row["source"]])
 
@@ -447,10 +486,12 @@ def api_export_csv():
 
 
 def main():
-    init_db()
     port = int(os.environ.get("PORT", "5053"))
     host = os.environ.get("HOST", "0.0.0.0")
     app.run(host=host, port=port, debug=False, use_reloader=False)
+
+
+init_db()
 
 
 if __name__ == "__main__":
