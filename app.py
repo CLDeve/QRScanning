@@ -89,154 +89,351 @@ INDEX_TEMPLATE = """
   <title>QR Scanner</title>
   <style>
     :root {
-      --bg: #f2f5f8;
-      --card: #ffffff;
-      --ink: #0f172a;
-      --muted: #64748b;
-      --accent: #0f766e;
-      --secondary: #1f2937;
-      --border: #d5dee8;
-      --danger: #b91c1c;
+      --ink: #f8fafc;
+      --muted: #cbd5e1;
+      --glass: rgba(15, 23, 42, 0.55);
+      --glass-strong: rgba(2, 6, 23, 0.74);
+      --line: rgba(255, 255, 255, 0.22);
+      --accent: #22c55e;
+      --danger: #f87171;
+      --button: rgba(30, 41, 59, 0.76);
+      --button-soft: rgba(15, 23, 42, 0.7);
+    }
+    * {
+      box-sizing: border-box;
+    }
+    html, body {
+      height: 100%;
     }
     body {
       margin: 0;
       font-family: "Avenir Next", "Segoe UI", sans-serif;
-      background: radial-gradient(circle at top right, #d9efe9 0, #f2f5f8 35%);
+      background: #020617;
       color: var(--ink);
+      overflow: hidden;
     }
-    .wrap {
-      max-width: 980px;
-      margin: 24px auto;
-      padding: 0 16px;
-    }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 16px;
-      margin-bottom: 16px;
-      box-shadow: 0 4px 20px rgba(10, 30, 50, 0.06);
-    }
-    h1 {
-      margin: 0 0 8px;
-      font-size: 24px;
-    }
-    .muted {
-      color: var(--muted);
-      font-size: 14px;
+    .scanner-shell {
+      position: fixed;
+      inset: 0;
+      background: #000;
     }
     video {
+      position: absolute;
+      inset: 0;
       width: 100%;
-      height: min(70vh, 640px);
-      min-height: 420px;
-      background: #111827;
-      border-radius: 12px;
-      margin-top: 10px;
-      object-fit: contain;
-    }
-    @media (max-width: 700px) {
-      video {
-        height: 62vh;
-        min-height: 360px;
-      }
+      height: 100%;
+      object-fit: cover;
+      background: #000;
     }
     #qr-canvas {
       display: none;
     }
-    .actions {
-      margin-top: 10px;
+    .top-overlay {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 0;
+      padding: max(env(safe-area-inset-top), 14px) 14px 16px;
+      background: linear-gradient(180deg, rgba(2, 6, 23, 0.88), rgba(2, 6, 23, 0));
+      pointer-events: none;
+      z-index: 4;
+    }
+    .topbar {
+      pointer-events: auto;
       display: flex;
-      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .topbar h1 {
+      margin: 0;
+      font-size: 30px;
+      letter-spacing: 0.01em;
+      text-shadow: 0 4px 22px rgba(0, 0, 0, 0.45);
+    }
+    .topbar .badge {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      backdrop-filter: blur(8px);
+      background: rgba(15, 23, 42, 0.4);
+    }
+    .scan-zone {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: min(74vw, 360px);
+      aspect-ratio: 1;
+      transform: translate(-50%, -50%);
+      z-index: 3;
+      pointer-events: none;
+    }
+    .scan-zone::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 28px;
+      box-shadow: 0 0 0 999vmax rgba(2, 6, 23, 0.34);
+    }
+    .scan-zone::after {
+      content: "";
+      position: absolute;
+      left: 6%;
+      right: 6%;
+      top: 8%;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, rgba(34, 197, 94, 0.95), transparent);
+      animation: sweep 2s linear infinite;
+    }
+    .corner {
+      position: absolute;
+      width: 56px;
+      height: 56px;
+      border: 4px solid #fff;
+      opacity: 0.88;
+    }
+    .corner.tl {
+      left: 0;
+      top: 0;
+      border-right: 0;
+      border-bottom: 0;
+      border-top-left-radius: 24px;
+    }
+    .corner.tr {
+      right: 0;
+      top: 0;
+      border-left: 0;
+      border-bottom: 0;
+      border-top-right-radius: 24px;
+    }
+    .corner.bl {
+      left: 0;
+      bottom: 0;
+      border-right: 0;
+      border-top: 0;
+      border-bottom-left-radius: 24px;
+    }
+    .corner.br {
+      right: 0;
+      bottom: 0;
+      border-left: 0;
+      border-top: 0;
+      border-bottom-right-radius: 24px;
+    }
+    .bottom-overlay {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 5;
+      padding: 18px 14px max(env(safe-area-inset-bottom), 16px);
+      background: linear-gradient(0deg, rgba(2, 6, 23, 0.96), rgba(2, 6, 23, 0.64) 45%, rgba(2, 6, 23, 0.02));
+    }
+    .result {
+      min-height: 22px;
+      margin-bottom: 10px;
+      color: #86efac;
+      font-size: 14px;
+      font-weight: 600;
+      text-shadow: 0 2px 18px rgba(0, 0, 0, 0.45);
+    }
+    .result.error {
+      color: var(--danger);
+    }
+    .control-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
     }
     button {
-      border: 0;
-      border-radius: 10px;
-      padding: 11px 14px;
-      font-weight: 600;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 11px 12px;
+      font-weight: 700;
       font-size: 14px;
-      background: var(--accent);
-      color: white;
+      color: #fff;
+      background: var(--button);
+      backdrop-filter: blur(10px);
       cursor: pointer;
     }
-    .secondary {
-      background: var(--secondary);
+    button.primary {
+      border-color: rgba(74, 222, 128, 0.7);
+      background: linear-gradient(180deg, rgba(34, 197, 94, 0.85), rgba(22, 163, 74, 0.86));
     }
-    form {
+    button.ghost {
+      background: var(--button-soft);
+    }
+    .manual {
       display: grid;
       grid-template-columns: 1fr auto;
       gap: 8px;
       margin-top: 10px;
+      max-height: 80px;
+      opacity: 1;
+      overflow: hidden;
+      transition: max-height 0.2s ease, opacity 0.2s ease;
+    }
+    .manual.collapsed {
+      max-height: 0;
+      opacity: 0;
+      pointer-events: none;
+      margin-top: 0;
     }
     input {
       width: 100%;
-      box-sizing: border-box;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.68);
+      color: #fff;
+      padding: 11px 14px;
       font-size: 15px;
+      outline: none;
     }
-    .result {
-      margin-top: 8px;
-      min-height: 18px;
-      font-size: 14px;
-      color: #0b5f59;
+    input::placeholder {
+      color: var(--muted);
     }
-    .error {
-      color: var(--danger);
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 14px;
+    .history {
       margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--glass);
+      backdrop-filter: blur(10px);
+      padding: 10px;
     }
-    th, td {
-      text-align: left;
-      padding: 9px;
-      border-bottom: 1px solid var(--border);
-      vertical-align: top;
-    }
-    th {
+    .history-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
       font-size: 12px;
+      color: var(--muted);
       letter-spacing: 0.04em;
       text-transform: uppercase;
-      color: var(--muted);
+    }
+    .history-head a {
+      color: #bfdbfe;
+      text-decoration: none;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+    #rows {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      max-height: 20vh;
+      overflow: auto;
+    }
+    #rows li {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 8px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.12);
+      align-items: center;
+    }
+    #rows li:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+    .row-code {
+      font-size: 14px;
+      font-weight: 700;
+      color: #f8fafc;
+      overflow-wrap: anywhere;
+    }
+    .row-meta {
+      font-size: 11px;
+      color: #cbd5e1;
+      text-align: right;
+      white-space: nowrap;
+    }
+    body.scanning .badge-dot {
+      animation: pulse 1.1s ease-in-out infinite;
+      background: #22c55e;
+    }
+    .badge-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #94a3b8;
+      display: inline-block;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    @keyframes sweep {
+      0% {
+        transform: translateY(0);
+        opacity: 0.2;
+      }
+      50% {
+        transform: translateY(280px);
+        opacity: 1;
+      }
+      100% {
+        transform: translateY(0);
+        opacity: 0.2;
+      }
+    }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.8); }
+      50% { box-shadow: 0 0 0 9px rgba(34, 197, 94, 0); }
+    }
+    @media (min-width: 900px) {
+      .scan-zone {
+        width: min(38vw, 420px);
+      }
+      .bottom-overlay {
+        max-width: 540px;
+        left: 50%;
+        transform: translateX(-50%);
+        border-radius: 18px 18px 0 0;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-bottom: 0;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="card">
-      <h1>QR Scanner</h1>
-      <div class="muted">Scan QR with camera. Every scan is saved in the system.</div>
-      <video id="qr-video" autoplay playsinline muted></video>
-      <canvas id="qr-canvas"></canvas>
-      <div class="actions">
-        <button id="start-scan" type="button">Start Camera Scan</button>
-        <button id="stop-scan" type="button" class="secondary">Stop Scan</button>
+  <div class="scanner-shell">
+    <video id="qr-video" autoplay playsinline muted></video>
+    <canvas id="qr-canvas"></canvas>
+
+    <div class="top-overlay">
+      <div class="topbar">
+        <h1>QR Scanner</h1>
+        <div class="badge"><span class="badge-dot"></span>Live</div>
+      </div>
+    </div>
+
+    <div class="scan-zone">
+      <span class="corner tl"></span>
+      <span class="corner tr"></span>
+      <span class="corner bl"></span>
+      <span class="corner br"></span>
+    </div>
+
+    <div class="bottom-overlay">
+      <div id="scan-result" class="result">Ready to scan</div>
+      <div class="control-row">
+        <button id="start-scan" class="primary" type="button">Start</button>
+        <button id="stop-scan" class="ghost" type="button">Stop</button>
+        <button id="toggle-manual" class="ghost" type="button">Manual</button>
       </div>
 
-      <form id="manual-form">
-        <input id="manual-text" placeholder="Manual QR text fallback">
+      <form id="manual-form" class="manual collapsed">
+        <input id="manual-text" placeholder="Manual QR text">
         <button type="submit">Submit</button>
       </form>
 
-      <div id="scan-result" class="result"></div>
-    </div>
-
-    <div class="card">
-      <a href="/api/export.csv"><button type="button" class="secondary">Export CSV</button></a>
-      <table>
-        <thead>
-          <tr>
-            <th>Time (UTC)</th>
-            <th>QR Text</th>
-            <th>Source</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
+      <div class="history">
+        <div class="history-head">
+          <span>Recent scans</span>
+          <a href="/api/export.csv">Export CSV</a>
+        </div>
+        <ul id="rows"></ul>
+      </div>
     </div>
   </div>
 
@@ -246,6 +443,10 @@ INDEX_TEMPLATE = """
     const canvas = document.getElementById('qr-canvas');
     const canvasCtx = canvas.getContext('2d', { willReadFrequently: true });
     const resultBox = document.getElementById('scan-result');
+    const rowsList = document.getElementById('rows');
+    const manualForm = document.getElementById('manual-form');
+    const manualInput = document.getElementById('manual-text');
+    const manualToggle = document.getElementById('toggle-manual');
     let stream = null;
     let detector = null;
     let detectorMode = null;
@@ -258,21 +459,32 @@ INDEX_TEMPLATE = """
       resultBox.className = isError ? 'result error' : 'result';
     }
 
+    function setScanningState(isOn) {
+      document.body.classList.toggle('scanning', isOn);
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
     async function refreshRows() {
       const res = await fetch('/api/scans?limit=400');
       if (!res.ok) return;
       const rows = await res.json();
-      const tbody = document.getElementById('rows');
-      tbody.innerHTML = '';
+      if (!Array.isArray(rows)) return;
 
-      rows.forEach((row) => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${row.scanned_at_utc}</td>
-          <td>${row.qr_text}</td>
-          <td>${row.source}</td>
-        `;
-        tbody.appendChild(tr);
+      rowsList.innerHTML = '';
+      rows.slice(0, 12).forEach((row) => {
+        const li = document.createElement('li');
+        const code = escapeHtml(row.qr_text || '');
+        const meta = `${escapeHtml(row.source || 'UNKNOWN')} | ${escapeHtml(row.scanned_at_utc || '')}`;
+        li.innerHTML = `<span class="row-code">${code}</span><span class="row-meta">${meta}</span>`;
+        rowsList.appendChild(li);
       });
     }
 
@@ -367,6 +579,10 @@ INDEX_TEMPLATE = """
     }
 
     async function startCameraScan() {
+      if (scanning) {
+        return;
+      }
+
       detector = null;
       detectorMode = null;
 
@@ -406,12 +622,14 @@ INDEX_TEMPLATE = """
       }
 
       scanning = true;
+      setScanningState(true);
       setResult(detectorMode === 'barcode' ? 'Camera scan started' : 'Camera scan started (fallback mode)');
       scanLoop();
     }
 
     function stopCameraScan() {
       scanning = false;
+      setScanningState(false);
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
         stream = null;
@@ -422,15 +640,21 @@ INDEX_TEMPLATE = """
 
     document.getElementById('start-scan').addEventListener('click', startCameraScan);
     document.getElementById('stop-scan').addEventListener('click', stopCameraScan);
-
-    document.getElementById('manual-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const input = document.getElementById('manual-text');
-      const text = input.value;
-      await submitScan(text, 'MANUAL');
-      input.value = '';
+    manualToggle.addEventListener('click', () => {
+      manualForm.classList.toggle('collapsed');
+      if (!manualForm.classList.contains('collapsed')) {
+        manualInput.focus();
+      }
     });
 
+    manualForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const text = manualInput.value;
+      await submitScan(text, 'MANUAL');
+      manualInput.value = '';
+    });
+
+    setScanningState(false);
     refreshRows();
     setInterval(refreshRows, 2500);
   </script>
