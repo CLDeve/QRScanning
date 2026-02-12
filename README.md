@@ -49,7 +49,8 @@ Use that URL on your phone.
 - Use Chrome/Safari latest version.
 - Grant camera permission when prompted.
 - HTTPS is required for camera access (Render URL is HTTPS).
-- If camera scan is unavailable on your phone browser, use manual text input fallback.
+- App uses native `BarcodeDetector` with `jsQR` fallback for broader phone support.
+- If camera scan still fails, use manual text input fallback.
 
 ## Data Store
 

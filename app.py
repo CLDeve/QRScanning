@@ -117,6 +117,9 @@ INDEX_TEMPLATE = """
       border-radius: 12px;
       margin-top: 10px;
     }
+    #qr-canvas {
+      display: none;
+    }
     .actions {
       margin-top: 10px;
       display: flex;
@@ -185,6 +188,7 @@ INDEX_TEMPLATE = """
       <h1>QR Scanner</h1>
       <div class="muted">Scan QR with camera. Every scan is saved in the system.</div>
       <video id="qr-video" autoplay playsinline muted></video>
+      <canvas id="qr-canvas"></canvas>
       <div class="actions">
         <button id="start-scan" type="button">Start Camera Scan</button>
         <button id="stop-scan" type="button" class="secondary">Stop Scan</button>
@@ -213,11 +217,15 @@ INDEX_TEMPLATE = """
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
   <script>
     const video = document.getElementById('qr-video');
+    const canvas = document.getElementById('qr-canvas');
+    const canvasCtx = canvas.getContext('2d', { willReadFrequently: true });
     const resultBox = document.getElementById('scan-result');
     let stream = null;
     let detector = null;
+    let detectorMode = null;
     let scanning = false;
     let lastSentText = '';
     let lastSentAt = 0;
@@ -274,15 +282,41 @@ INDEX_TEMPLATE = """
       await refreshRows();
     }
 
+    async function detectQrFromFrame() {
+      if (detectorMode === 'barcode' && detector) {
+        const barcodes = await detector.detect(video);
+        if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+          return barcodes[0].rawValue;
+        }
+        return null;
+      }
+
+      if (detectorMode === 'jsqr' && window.jsQR) {
+        const width = video.videoWidth;
+        const height = video.videoHeight;
+        if (!width || !height) {
+          return null;
+        }
+        canvas.width = width;
+        canvas.height = height;
+        canvasCtx.drawImage(video, 0, 0, width, height);
+        const imageData = canvasCtx.getImageData(0, 0, width, height);
+        const code = window.jsQR(imageData.data, width, height, { inversionAttempts: 'dontInvert' });
+        return code && code.data ? code.data : null;
+      }
+
+      return null;
+    }
+
     async function scanLoop() {
-      if (!scanning || !detector) {
+      if (!scanning) {
         return;
       }
 
       try {
-        const barcodes = await detector.detect(video);
-        if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
-          await submitScan(barcodes[0].rawValue, 'CAMERA');
+        const qrText = await detectQrFromFrame();
+        if (qrText) {
+          await submitScan(qrText, 'CAMERA');
         }
       } catch (_) {
         // keep loop alive
@@ -294,15 +328,24 @@ INDEX_TEMPLATE = """
     }
 
     async function startCameraScan() {
-      if (!('BarcodeDetector' in window)) {
-        setResult('Browser camera QR scan not supported. Use manual input.', true);
-        return;
+      detector = null;
+      detectorMode = null;
+
+      if ('BarcodeDetector' in window) {
+        try {
+          detector = new BarcodeDetector({ formats: ['qr_code'] });
+          detectorMode = 'barcode';
+        } catch (_) {
+          detector = null;
+        }
       }
 
-      try {
-        detector = new BarcodeDetector({ formats: ['qr_code'] });
-      } catch (err) {
-        setResult(`Barcode detector init failed: ${err}`, true);
+      if (!detectorMode && window.jsQR) {
+        detectorMode = 'jsqr';
+      }
+
+      if (!detectorMode) {
+        setResult('Browser camera QR scan not supported. Use manual input.', true);
         return;
       }
 
@@ -324,7 +367,7 @@ INDEX_TEMPLATE = """
       }
 
       scanning = true;
-      setResult('Camera scan started');
+      setResult(detectorMode === 'barcode' ? 'Camera scan started' : 'Camera scan started (fallback mode)');
       scanLoop();
     }
 
