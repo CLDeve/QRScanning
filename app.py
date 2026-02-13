@@ -163,11 +163,6 @@ INDEX_TEMPLATE = """
       justify-content: space-between;
       gap: 10px;
     }
-    .topbar-right {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
     .topbar h1 {
       margin: 0;
       font-size: 30px;
@@ -179,16 +174,6 @@ INDEX_TEMPLATE = """
       border-radius: 999px;
       padding: 6px 10px;
       font-size: 12px;
-      backdrop-filter: blur(8px);
-      background: rgba(15, 23, 42, 0.4);
-    }
-    .topbar .top-link {
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 6px 10px;
-      font-size: 12px;
-      color: #f8fafc;
-      text-decoration: none;
       backdrop-filter: blur(8px);
       background: rgba(15, 23, 42, 0.4);
     }
@@ -444,10 +429,7 @@ INDEX_TEMPLATE = """
     <div class="top-overlay">
       <div class="topbar">
         <h1>Gate Scanner</h1>
-        <div class="topbar-right">
-          <div class="badge"><span class="badge-dot"></span>Live</div>
-          <a class="top-link" href="/office">Office</a>
-        </div>
+        <div class="badge"><span class="badge-dot"></span>Live</div>
       </div>
     </div>
 
@@ -897,7 +879,6 @@ OFFICE_TEMPLATE = """
         <div class="muted">Live monitor of scanned gate codes.</div>
       </div>
       <div class="links">
-        <a class="btn" href="/">Open Scanner</a>
         <a class="btn primary" href="/api/export.csv">Export CSV</a>
       </div>
     </div>
