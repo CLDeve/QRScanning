@@ -304,62 +304,6 @@ INDEX_TEMPLATE = """
     .hidden {
       display: none;
     }
-    .history {
-      margin-top: 10px;
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      background: var(--glass);
-      backdrop-filter: blur(10px);
-      padding: 10px;
-    }
-    .history-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 8px;
-      font-size: 12px;
-      color: var(--muted);
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
-    .history-head a {
-      color: #bfdbfe;
-      text-decoration: none;
-      font-weight: 700;
-      letter-spacing: 0;
-      text-transform: none;
-    }
-    #rows {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-      max-height: 20vh;
-      overflow: auto;
-    }
-    #rows li {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      padding: 8px 0;
-      border-top: 1px solid rgba(255, 255, 255, 0.12);
-      align-items: center;
-    }
-    #rows li:first-child {
-      border-top: 0;
-      padding-top: 0;
-    }
-    .row-code {
-      font-size: 14px;
-      font-weight: 700;
-      color: #f8fafc;
-      overflow-wrap: anywhere;
-    }
-    .row-meta {
-      font-size: 11px;
-      color: #cbd5e1;
-      text-align: right;
-      white-space: nowrap;
-    }
     body.scanning .badge-dot {
       animation: pulse 1.1s ease-in-out infinite;
       background: #22c55e;
@@ -423,13 +367,6 @@ INDEX_TEMPLATE = """
         <button id="clear-detected" class="ghost hidden" type="button">Reset</button>
       </div>
 
-      <div class="history">
-        <div class="history-head">
-          <span>Recent scans</span>
-          <a href="/api/export.csv">Export CSV</a>
-        </div>
-        <ul id="rows"></ul>
-      </div>
     </div>
   </div>
 
@@ -439,7 +376,6 @@ INDEX_TEMPLATE = """
     const canvas = document.getElementById('qr-canvas');
     const canvasCtx = canvas.getContext('2d', { willReadFrequently: true });
     const resultBox = document.getElementById('scan-result');
-    const rowsList = document.getElementById('rows');
     const captureButton = document.getElementById('capture-scan');
     const clearButton = document.getElementById('clear-detected');
     const detectedChip = document.getElementById('detected-chip');
@@ -460,15 +396,6 @@ INDEX_TEMPLATE = """
       document.body.classList.toggle('scanning', isOn);
     }
 
-    function escapeHtml(text) {
-      return String(text)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;');
-    }
-
     function setPendingDetection(text) {
       pendingDetectedText = (text || '').trim();
       const hasPending = Boolean(pendingDetectedText);
@@ -482,22 +409,6 @@ INDEX_TEMPLATE = """
       } else {
         detectedChip.textContent = '';
       }
-    }
-
-    async function refreshRows() {
-      const res = await fetch('/api/scans?limit=400');
-      if (!res.ok) return;
-      const rows = await res.json();
-      if (!Array.isArray(rows)) return;
-
-      rowsList.innerHTML = '';
-      rows.slice(0, 12).forEach((row) => {
-        const li = document.createElement('li');
-        const code = escapeHtml(row.qr_text || '');
-        const meta = `${escapeHtml(row.source || 'UNKNOWN')} | ${escapeHtml(row.scanned_at_utc || '')}`;
-        li.innerHTML = `<span class="row-code">${code}</span><span class="row-meta">${meta}</span>`;
-        rowsList.appendChild(li);
-      });
     }
 
     async function submitScan(qrText, source) {
@@ -542,7 +453,6 @@ INDEX_TEMPLATE = """
       lastSentText = payload;
       lastSentAt = now;
       setResult('Scan saved');
-      await refreshRows();
       return true;
     }
 
@@ -679,8 +589,6 @@ INDEX_TEMPLATE = """
     });
 
     setScanningState(false);
-    refreshRows();
-    setInterval(refreshRows, 2500);
   </script>
 </body>
 </html>
