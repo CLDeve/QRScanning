@@ -270,7 +270,7 @@ INDEX_TEMPLATE = """
     }
     .control-row {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
     .capture-row {
@@ -303,35 +303,6 @@ INDEX_TEMPLATE = """
     }
     .hidden {
       display: none;
-    }
-    .manual {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      margin-top: 10px;
-      max-height: 80px;
-      opacity: 1;
-      overflow: hidden;
-      transition: max-height 0.2s ease, opacity 0.2s ease;
-    }
-    .manual.collapsed {
-      max-height: 0;
-      opacity: 0;
-      pointer-events: none;
-      margin-top: 0;
-    }
-    input {
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: rgba(15, 23, 42, 0.68);
-      color: #fff;
-      padding: 11px 14px;
-      font-size: 15px;
-      outline: none;
-    }
-    input::placeholder {
-      color: var(--muted);
     }
     .history {
       margin-top: 10px;
@@ -446,17 +417,11 @@ INDEX_TEMPLATE = """
       <div class="control-row">
         <button id="start-scan" class="primary" type="button">Start</button>
         <button id="stop-scan" class="ghost" type="button">Stop</button>
-        <button id="toggle-manual" class="ghost" type="button">Manual</button>
       </div>
       <div class="capture-row">
         <button id="capture-scan" class="capture hidden" type="button">Capture</button>
         <button id="clear-detected" class="ghost hidden" type="button">Reset</button>
       </div>
-
-      <form id="manual-form" class="manual collapsed">
-        <input id="manual-text" placeholder="Manual gate code">
-        <button type="submit">Submit</button>
-      </form>
 
       <div class="history">
         <div class="history-head">
@@ -475,9 +440,6 @@ INDEX_TEMPLATE = """
     const canvasCtx = canvas.getContext('2d', { willReadFrequently: true });
     const resultBox = document.getElementById('scan-result');
     const rowsList = document.getElementById('rows');
-    const manualForm = document.getElementById('manual-form');
-    const manualInput = document.getElementById('manual-text');
-    const manualToggle = document.getElementById('toggle-manual');
     const captureButton = document.getElementById('capture-scan');
     const clearButton = document.getElementById('clear-detected');
     const detectedChip = document.getElementById('detected-chip');
@@ -658,7 +620,7 @@ INDEX_TEMPLATE = """
       }
 
       if (!detectorMode) {
-        setResult('Browser camera QR scan not supported. Use manual input.', true);
+        setResult('Browser camera QR scan not supported on this device.', true);
         return;
       }
 
@@ -700,12 +662,6 @@ INDEX_TEMPLATE = """
 
     document.getElementById('start-scan').addEventListener('click', startCameraScan);
     document.getElementById('stop-scan').addEventListener('click', stopCameraScan);
-    manualToggle.addEventListener('click', () => {
-      manualForm.classList.toggle('collapsed');
-      if (!manualForm.classList.contains('collapsed')) {
-        manualInput.focus();
-      }
-    });
     captureButton.addEventListener('click', async () => {
       if (!pendingDetectedText) {
         setResult('No detected gate code yet.', true);
@@ -720,13 +676,6 @@ INDEX_TEMPLATE = """
     clearButton.addEventListener('click', () => {
       setPendingDetection('');
       setResult('Ready to detect next gate code');
-    });
-
-    manualForm.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const text = manualInput.value;
-      await submitScan(text, 'MANUAL');
-      manualInput.value = '';
     });
 
     setScanningState(false);

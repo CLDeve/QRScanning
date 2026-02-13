@@ -5,7 +5,6 @@ Simple web app for QR scanning only.
 ## Features
 
 - Camera-based QR scan in browser
-- Manual gate code fallback
 - Scan history saved in SQLite
 - CSV export of scan logs
 - Office dashboard for backend monitoring (`/office`)
@@ -53,7 +52,6 @@ Use that URL on your phone.
 - Grant camera permission when prompted.
 - HTTPS is required for camera access (Render URL is HTTPS).
 - App uses native `BarcodeDetector` with `jsQR` fallback for broader phone support.
-- If camera scan still fails, use manual text input fallback.
 
 ## Data Store
 
