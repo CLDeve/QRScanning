@@ -5,9 +5,10 @@ Simple web app for QR scanning only.
 ## Features
 
 - Camera-based QR scan in browser
-- Manual QR text fallback
+- Manual gate code fallback
 - Scan history saved in SQLite
 - CSV export of scan logs
+- Office dashboard for backend monitoring (`/office`)
 
 ## Local Run
 
@@ -23,6 +24,7 @@ PORT=5053 python app.py
 Open:
 
 - `http://127.0.0.1:5053`
+- `http://127.0.0.1:5053/office`
 
 ## Deploy on Render (for phone testing)
 

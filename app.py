@@ -80,6 +80,24 @@ def list_scans(limit: int = 300):
     return [dict(row) for row in rows]
 
 
+def list_gate_summary(limit: int = 300):
+    with db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                qr_text AS gate_code,
+                COUNT(*) AS scan_count,
+                MAX(scanned_at_utc) AS last_scanned_at_utc
+            FROM scans
+            GROUP BY qr_text
+            ORDER BY last_scanned_at_utc DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 INDEX_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -145,6 +163,11 @@ INDEX_TEMPLATE = """
       justify-content: space-between;
       gap: 10px;
     }
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
     .topbar h1 {
       margin: 0;
       font-size: 30px;
@@ -156,6 +179,16 @@ INDEX_TEMPLATE = """
       border-radius: 999px;
       padding: 6px 10px;
       font-size: 12px;
+      backdrop-filter: blur(8px);
+      background: rgba(15, 23, 42, 0.4);
+    }
+    .topbar .top-link {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      color: #f8fafc;
+      text-decoration: none;
       backdrop-filter: blur(8px);
       background: rgba(15, 23, 42, 0.4);
     }
@@ -411,7 +444,10 @@ INDEX_TEMPLATE = """
     <div class="top-overlay">
       <div class="topbar">
         <h1>Gate Scanner</h1>
-        <div class="badge"><span class="badge-dot"></span>Live</div>
+        <div class="topbar-right">
+          <div class="badge"><span class="badge-dot"></span>Live</div>
+          <a class="top-link" href="/office">Office</a>
+        </div>
       </div>
     </div>
 
@@ -720,9 +756,294 @@ INDEX_TEMPLATE = """
 """
 
 
+OFFICE_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gate Office Dashboard</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --card: #ffffff;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #dbe4ef;
+      --accent: #0f766e;
+      --warn: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at top right, #dcfce7 0, var(--bg) 42%);
+    }
+    .wrap {
+      max-width: 1160px;
+      margin: 24px auto 28px;
+      padding: 0 14px;
+    }
+    .top {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+    .muted { color: var(--muted); font-size: 14px; }
+    .links {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      border: 1px solid #cbd5e1;
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      text-decoration: none;
+      padding: 9px 13px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: #0f766e;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+    }
+    .kpi-title {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .kpi-value {
+      margin-top: 7px;
+      font-size: 30px;
+      font-weight: 800;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr;
+      gap: 10px;
+    }
+    .panel-title {
+      margin: 0 0 10px;
+      font-size: 17px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      padding: 9px 8px;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    td.mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 700;
+    }
+    .status {
+      min-height: 18px;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .status.err {
+      color: var(--warn);
+      font-weight: 700;
+    }
+    @media (max-width: 940px) {
+      .stats { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: 1fr; }
+      h1 { font-size: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>Gate Office Dashboard</h1>
+        <div class="muted">Live monitor of scanned gate codes.</div>
+      </div>
+      <div class="links">
+        <a class="btn" href="/">Open Scanner</a>
+        <a class="btn primary" href="/api/export.csv">Export CSV</a>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="card">
+        <div class="kpi-title">Total Scans</div>
+        <div class="kpi-value" id="kpi-total">0</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">Unique Gates</div>
+        <div class="kpi-value" id="kpi-gates">0</div>
+      </div>
+      <div class="card">
+        <div class="kpi-title">Last Scan (UTC)</div>
+        <div class="kpi-value" id="kpi-last" style="font-size:18px;">-</div>
+      </div>
+    </div>
+
+    <div class="status" id="status">Refreshing...</div>
+
+    <div class="grid">
+      <div class="card">
+        <h2 class="panel-title">Gate Summary</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Gate</th>
+              <th>Total Scans</th>
+              <th>Last Scanned (UTC)</th>
+            </tr>
+          </thead>
+          <tbody id="gate-rows"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2 class="panel-title">Recent Activity</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Time (UTC)</th>
+              <th>Gate</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody id="scan-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const gateRows = document.getElementById('gate-rows');
+    const scanRows = document.getElementById('scan-rows');
+    const kpiTotal = document.getElementById('kpi-total');
+    const kpiGates = document.getElementById('kpi-gates');
+    const kpiLast = document.getElementById('kpi-last');
+    const statusBox = document.getElementById('status');
+
+    function esc(text) {
+      return String(text || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function setStatus(text, isError = false) {
+      statusBox.textContent = text;
+      statusBox.className = isError ? 'status err' : 'status';
+    }
+
+    async function refreshDashboard() {
+      try {
+        const [summaryRes, scansRes] = await Promise.all([
+          fetch('/api/gate-summary?limit=1000'),
+          fetch('/api/scans?limit=200'),
+        ]);
+
+        if (!summaryRes.ok || !scansRes.ok) {
+          setStatus(`Failed to refresh (${summaryRes.status}/${scansRes.status})`, true);
+          return;
+        }
+
+        const summary = await summaryRes.json();
+        const scans = await scansRes.json();
+
+        if (!Array.isArray(summary) || !Array.isArray(scans)) {
+          setStatus('Unexpected API response', true);
+          return;
+        }
+
+        let totalScans = 0;
+        summary.forEach((row) => {
+          totalScans += Number(row.scan_count || 0);
+        });
+        kpiTotal.textContent = String(totalScans);
+        kpiGates.textContent = String(summary.length);
+        kpiLast.textContent = scans.length > 0 ? scans[0].scanned_at_utc : '-';
+
+        gateRows.innerHTML = '';
+        summary.forEach((row) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td class="mono">${esc(row.gate_code)}</td>
+            <td>${esc(row.scan_count)}</td>
+            <td>${esc(row.last_scanned_at_utc)}</td>
+          `;
+          gateRows.appendChild(tr);
+        });
+
+        scanRows.innerHTML = '';
+        scans.slice(0, 40).forEach((row) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${esc(row.scanned_at_utc)}</td>
+            <td class="mono">${esc(row.qr_text)}</td>
+            <td>${esc(row.source)}</td>
+          `;
+          scanRows.appendChild(tr);
+        });
+
+        setStatus(`Updated at ${new Date().toISOString()}`);
+      } catch (err) {
+        setStatus(`Refresh error: ${err.message || err}`, true);
+      }
+    }
+
+    refreshDashboard();
+    setInterval(refreshDashboard, 3000);
+  </script>
+</body>
+</html>
+"""
+
+
 @app.route("/")
 def index():
     return render_template_string(INDEX_TEMPLATE)
+
+
+@app.route("/office")
+def office():
+    return render_template_string(OFFICE_TEMPLATE)
 
 
 @app.route("/api/scan", methods=["POST"])
@@ -750,6 +1071,19 @@ def api_scans():
     limit = max(1, min(limit, 5000))
     try:
         return jsonify(list_scans(limit=limit))
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/gate-summary", methods=["GET"])
+def api_gate_summary():
+    try:
+        limit = int(request.args.get("limit", "300"))
+    except ValueError:
+        limit = 300
+    limit = max(1, min(limit, 5000))
+    try:
+        return jsonify(list_gate_summary(limit=limit))
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
 
