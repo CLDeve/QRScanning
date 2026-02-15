@@ -16,6 +16,10 @@ def resolve_db_path() -> str:
         return configured
     if os.environ.get("RENDER", "").lower() == "true":
         return "/tmp/qr_scans.db"
+    # On hosted runtimes (Render and similar), PORT is injected and the
+    # app directory may be read-only. Default to /tmp for SQLite writes.
+    if os.environ.get("PORT"):
+        return "/tmp/qr_scans.db"
     return "qr_scans.db"
 
 
