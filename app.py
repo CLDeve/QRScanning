@@ -742,7 +742,7 @@ INDEX_TEMPLATE = """
       setScanningState(true);
       setCaptureMode(true);
       setPendingDetection('');
-      setResult(detectorMode === 'barcode' ? 'Camera scan started' : 'Camera scan started (fallback mode)');
+      setResult('Camera scan started');
       scanLoop();
     }
 
