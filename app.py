@@ -31,6 +31,8 @@ def utc_now_iso() -> str:
 def db_connect():
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout=5000")
     return connection
 
 
@@ -40,7 +42,6 @@ def init_db():
         os.makedirs(db_dir, exist_ok=True)
 
     with db_connect() as connection:
-        connection.execute("PRAGMA busy_timeout=5000")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS scans (
@@ -48,6 +49,29 @@ def init_db():
                 scanned_at_utc TEXT NOT NULL,
                 qr_text TEXT NOT NULL,
                 source TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gate_code TEXT NOT NULL UNIQUE,
+                door_count INTEGER NOT NULL CHECK(door_count BETWEEN 2 AND 6),
+                created_at_utc TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gate_doors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gate_id INTEGER NOT NULL,
+                door_no INTEGER NOT NULL,
+                door_code TEXT NOT NULL UNIQUE,
+                created_at_utc TEXT NOT NULL,
+                FOREIGN KEY(gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+                UNIQUE(gate_id, door_no)
             )
             """
         )
@@ -96,6 +120,94 @@ def list_gate_summary(limit: int = 300):
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def normalize_gate_code(gate_code: str) -> str:
+    code = str(gate_code or "").strip().upper()
+    if not code:
+        raise ValueError("gate_code is required")
+    return code
+
+
+def validate_door_count(door_count) -> int:
+    try:
+        count = int(door_count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("door_count must be an integer between 2 and 6") from exc
+    if count < 2 or count > 6:
+        raise ValueError("door_count must be between 2 and 6")
+    return count
+
+
+def fetch_gate_with_doors(connection, gate_id: int):
+    gate_row = connection.execute(
+        """
+        SELECT id, gate_code, door_count, created_at_utc
+        FROM gates
+        WHERE id = ?
+        """,
+        (gate_id,),
+    ).fetchone()
+    if gate_row is None:
+        return None
+
+    door_rows = connection.execute(
+        """
+        SELECT door_no, door_code
+        FROM gate_doors
+        WHERE gate_id = ?
+        ORDER BY door_no ASC
+        """,
+        (gate_id,),
+    ).fetchall()
+    return {
+        "id": gate_row["id"],
+        "gate_code": gate_row["gate_code"],
+        "door_count": gate_row["door_count"],
+        "created_at_utc": gate_row["created_at_utc"],
+        "doors": [dict(row) for row in door_rows],
+    }
+
+
+def create_gate(gate_code: str, door_count):
+    code = normalize_gate_code(gate_code)
+    count = validate_door_count(door_count)
+    now = utc_now_iso()
+
+    with db_connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO gates(gate_code, door_count, created_at_utc)
+            VALUES(?, ?, ?)
+            """,
+            (code, count, now),
+        )
+        gate_id = cursor.lastrowid
+        for door_no in range(1, count + 1):
+            door_code = f"{code}-D{door_no}"
+            connection.execute(
+                """
+                INSERT INTO gate_doors(gate_id, door_no, door_code, created_at_utc)
+                VALUES(?, ?, ?, ?)
+                """,
+                (gate_id, door_no, door_code, now),
+            )
+        connection.commit()
+        return fetch_gate_with_doors(connection, gate_id)
+
+
+def list_gates(limit: int = 300):
+    with db_connect() as connection:
+        gate_rows = connection.execute(
+            """
+            SELECT id
+            FROM gates
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [fetch_gate_with_doors(connection, row["id"]) for row in gate_rows]
 
 
 INDEX_TEMPLATE = """
@@ -736,6 +848,7 @@ OFFICE_TEMPLATE = """
         <div class="muted">Live monitor of scanned gate codes.</div>
       </div>
       <div class="links">
+        <a class="btn" href="/office/gates">Gate Setup</a>
         <a class="btn primary" href="/api/export.csv">Export CSV</a>
       </div>
     </div>
@@ -874,6 +987,290 @@ OFFICE_TEMPLATE = """
 """
 
 
+GATE_SETUP_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gate Setup</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --card: #ffffff;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #dbe4ef;
+      --accent: #0f766e;
+      --warn: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at top right, #dcfce7 0, var(--bg) 42%);
+    }
+    .wrap {
+      max-width: 1080px;
+      margin: 24px auto 28px;
+      padding: 0 14px;
+    }
+    .top {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+    .muted { color: var(--muted); font-size: 14px; }
+    .btn {
+      border: 1px solid #cbd5e1;
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      text-decoration: none;
+      padding: 9px 13px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .btn.primary {
+      background: var(--accent);
+      color: #fff;
+      border-color: #0f766e;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 10px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+    }
+    .card h2 {
+      margin: 0 0 10px;
+      font-size: 18px;
+    }
+    .field {
+      margin-bottom: 10px;
+    }
+    .field label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    input, select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 15px;
+      background: #fff;
+      color: var(--ink);
+    }
+    .status {
+      min-height: 18px;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .status.err {
+      color: var(--warn);
+      font-weight: 700;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      padding: 9px 8px;
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    td.mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 700;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .chip {
+      border: 1px solid #bfdbfe;
+      background: #eff6ff;
+      color: #1e3a8a;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    @media (max-width: 940px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+      h1 {
+        font-size: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div>
+        <h1>Gate Setup</h1>
+        <div class="muted">Create gates and generate door definitions (2 to 6 doors per gate).</div>
+      </div>
+      <a href="/office" class="btn">Back to Dashboard</a>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Create Gate</h2>
+        <div id="status" class="status">Ready</div>
+        <form id="create-gate-form">
+          <div class="field">
+            <label for="gate-code">Gate Code</label>
+            <input id="gate-code" placeholder="e.g. G12" required>
+          </div>
+          <div class="field">
+            <label for="door-count">Doors</label>
+            <select id="door-count" required>
+              <option value="2">2 doors</option>
+              <option value="3">3 doors</option>
+              <option value="4" selected>4 doors</option>
+              <option value="5">5 doors</option>
+              <option value="6">6 doors</option>
+            </select>
+          </div>
+          <button class="btn primary" type="submit">Create Gate</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2>Configured Gates</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Gate</th>
+              <th>Doors</th>
+              <th>Door Codes</th>
+              <th>Created At (UTC)</th>
+            </tr>
+          </thead>
+          <tbody id="gate-rows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const gateRows = document.getElementById('gate-rows');
+    const statusBox = document.getElementById('status');
+    const form = document.getElementById('create-gate-form');
+    const gateCodeInput = document.getElementById('gate-code');
+    const doorCountInput = document.getElementById('door-count');
+
+    function esc(text) {
+      return String(text || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function setStatus(text, isError = false) {
+      statusBox.textContent = text;
+      statusBox.className = isError ? 'status err' : 'status';
+    }
+
+    function renderGateRows(gates) {
+      gateRows.innerHTML = '';
+      gates.forEach((gate) => {
+        const doors = Array.isArray(gate.doors) ? gate.doors : [];
+        const chips = doors.map((door) => `<span class="chip">${esc(door.door_code)}</span>`).join('');
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="mono">${esc(gate.gate_code)}</td>
+          <td>${esc(gate.door_count)}</td>
+          <td><div class="chips">${chips}</div></td>
+          <td>${esc(gate.created_at_utc)}</td>
+        `;
+        gateRows.appendChild(tr);
+      });
+    }
+
+    async function refreshGates() {
+      const res = await fetch('/api/gates?limit=500');
+      if (!res.ok) {
+        setStatus(`Failed to load gates (${res.status})`, true);
+        return;
+      }
+      const gates = await res.json();
+      if (!Array.isArray(gates)) {
+        setStatus('Unexpected gate list response', true);
+        return;
+      }
+      renderGateRows(gates);
+      setStatus(`Loaded ${gates.length} gates`);
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const gateCode = gateCodeInput.value.trim();
+      const doorCount = Number(doorCountInput.value);
+      if (!gateCode) {
+        setStatus('Gate code is required', true);
+        return;
+      }
+
+      const res = await fetch('/api/gates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gate_code: gateCode, door_count: doorCount }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStatus(data.error || `Create gate failed (${res.status})`, true);
+        return;
+      }
+
+      gateCodeInput.value = '';
+      doorCountInput.value = '4';
+      setStatus(`Created gate ${data.gate_code} with ${data.door_count} doors`);
+      await refreshGates();
+    });
+
+    refreshGates();
+  </script>
+</body>
+</html>
+"""
+
+
 @app.route("/")
 def index():
     return render_template_string(INDEX_TEMPLATE)
@@ -882,6 +1279,11 @@ def index():
 @app.route("/office")
 def office():
     return render_template_string(OFFICE_TEMPLATE)
+
+
+@app.route("/office/gates")
+def office_gates():
+    return render_template_string(GATE_SETUP_TEMPLATE)
 
 
 @app.route("/api/scan", methods=["POST"])
@@ -922,6 +1324,36 @@ def api_gate_summary():
     limit = max(1, min(limit, 5000))
     try:
         return jsonify(list_gate_summary(limit=limit))
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/gates", methods=["GET"])
+def api_gates():
+    try:
+        limit = int(request.args.get("limit", "300"))
+    except ValueError:
+        limit = 300
+    limit = max(1, min(limit, 5000))
+    try:
+        return jsonify(list_gates(limit=limit))
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/gates", methods=["POST"])
+def api_create_gate():
+    payload = request.get_json(silent=True) or {}
+    gate_code = payload.get("gate_code", "")
+    door_count = payload.get("door_count", "")
+
+    try:
+        gate = create_gate(gate_code, door_count)
+        return jsonify(gate), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "gate_code already exists"}), 409
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
 
