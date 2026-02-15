@@ -102,6 +102,39 @@ def init_db():
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gate_cycle_state (
+                gate_id INTEGER PRIMARY KEY,
+                last_completed_scan_id INTEGER NOT NULL DEFAULT 0,
+                updated_at_utc TEXT NOT NULL,
+                FOREIGN KEY(gate_id) REFERENCES gate_configs(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gate_cycle_door_state (
+                gate_id INTEGER NOT NULL,
+                door_no INTEGER NOT NULL,
+                last_scan_id INTEGER NOT NULL,
+                PRIMARY KEY(gate_id, door_no),
+                FOREIGN KEY(gate_id) REFERENCES gate_configs(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS action_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gate_id INTEGER NOT NULL,
+                completed_scan_id INTEGER NOT NULL,
+                completed_at_utc TEXT NOT NULL,
+                FOREIGN KEY(gate_id) REFERENCES gate_configs(id) ON DELETE CASCADE,
+                UNIQUE(gate_id, completed_scan_id)
+            )
+            """
+        )
         connection.commit()
 
 
@@ -109,12 +142,20 @@ def add_scan(qr_text: str, source: str):
     if not qr_text.strip():
         raise ValueError("qr_text is required")
 
+    scanned_at = utc_now_iso()
+    normalized_qr = qr_text.strip()
+    normalized_source = source.strip().upper() or "UNKNOWN"
+
     with db_connect() as connection:
-        connection.execute(
+        cursor = connection.execute(
             "INSERT INTO scans(scanned_at_utc, qr_text, source) VALUES(?, ?, ?)",
-            (utc_now_iso(), qr_text.strip(), source.strip().upper() or "UNKNOWN"),
+            (scanned_at, normalized_qr, normalized_source),
         )
+        scan_id = cursor.lastrowid
+        process_scan_for_actions(connection, normalized_qr, scan_id, scanned_at)
         connection.commit()
+
+    return scan_id
 
 
 def list_scans(limit: int = 300):
@@ -147,6 +188,87 @@ def list_gate_summary(limit: int = 300):
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_at_utc: str):
+    matches = connection.execute(
+        """
+        SELECT gate_id, door_no
+        FROM gate_config_doors
+        WHERE door_number = ?
+        """,
+        (scanned_qr,),
+    ).fetchall()
+    if not matches:
+        return
+
+    gate_ids = set()
+    for row in matches:
+        gate_id = row["gate_id"]
+        gate_ids.add(gate_id)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO gate_cycle_state(gate_id, last_completed_scan_id, updated_at_utc)
+            VALUES(?, 0, ?)
+            """,
+            (gate_id, scanned_at_utc),
+        )
+        connection.execute(
+            """
+            INSERT INTO gate_cycle_door_state(gate_id, door_no, last_scan_id)
+            VALUES(?, ?, ?)
+            ON CONFLICT(gate_id, door_no) DO UPDATE SET last_scan_id = excluded.last_scan_id
+            """,
+            (gate_id, row["door_no"], scan_id),
+        )
+
+    for gate_id in gate_ids:
+        state_row = connection.execute(
+            "SELECT last_completed_scan_id FROM gate_cycle_state WHERE gate_id = ?",
+            (gate_id,),
+        ).fetchone()
+        if state_row is None:
+            continue
+        last_completed_scan_id = int(state_row["last_completed_scan_id"] or 0)
+
+        required_doors = connection.execute(
+            """
+            SELECT door_no
+            FROM gate_config_doors
+            WHERE gate_id = ?
+            ORDER BY door_no ASC
+            """,
+            (gate_id,),
+        ).fetchall()
+        if not required_doors:
+            continue
+
+        door_scan_rows = connection.execute(
+            """
+            SELECT door_no, last_scan_id
+            FROM gate_cycle_door_state
+            WHERE gate_id = ?
+            """,
+            (gate_id,),
+        ).fetchall()
+        door_scan_map = {row["door_no"]: int(row["last_scan_id"] or 0) for row in door_scan_rows}
+
+        if all(door_scan_map.get(row["door_no"], 0) > last_completed_scan_id for row in required_doors):
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO action_events(gate_id, completed_scan_id, completed_at_utc)
+                VALUES(?, ?, ?)
+                """,
+                (gate_id, scan_id, scanned_at_utc),
+            )
+            connection.execute(
+                """
+                UPDATE gate_cycle_state
+                SET last_completed_scan_id = ?, updated_at_utc = ?
+                WHERE gate_id = ?
+                """,
+                (scan_id, scanned_at_utc, gate_id),
+            )
 
 
 def normalize_gate_code(gate_code: str) -> str:
@@ -228,6 +350,13 @@ def create_gate(gate_code: str):
             """,
             (code, now),
         )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO gate_cycle_state(gate_id, last_completed_scan_id, updated_at_utc)
+            VALUES(?, 0, ?)
+            """,
+            (cursor.lastrowid, now),
+        )
         connection.commit()
         return fetch_gate_config_with_doors(connection, cursor.lastrowid)
 
@@ -242,6 +371,22 @@ def set_gate_doors(gate_id: int, door_numbers):
             raise ValueError("gate not found")
 
         connection.execute("DELETE FROM gate_config_doors WHERE gate_id = ?", (gate_id,))
+        connection.execute("DELETE FROM gate_cycle_door_state WHERE gate_id = ?", (gate_id,))
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO gate_cycle_state(gate_id, last_completed_scan_id, updated_at_utc)
+            VALUES(?, 0, ?)
+            """,
+            (gate_id, now),
+        )
+        connection.execute(
+            """
+            UPDATE gate_cycle_state
+            SET last_completed_scan_id = 0, updated_at_utc = ?
+            WHERE gate_id = ?
+            """,
+            (now, gate_id),
+        )
         for idx, door_number in enumerate(normalized, start=1):
             connection.execute(
                 """
@@ -268,6 +413,50 @@ def list_gates(limit: int = 300):
             (limit,),
         ).fetchall()
         return [fetch_gate_config_with_doors(connection, row["id"]) for row in gate_rows]
+
+
+def list_action_events(limit: int = 200):
+    with db_connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                e.id,
+                e.completed_at_utc,
+                e.completed_scan_id,
+                g.id AS gate_id,
+                g.gate_code
+            FROM action_events e
+            JOIN gate_configs g ON g.id = e.gate_id
+            ORDER BY e.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+        events = []
+        for row in rows:
+            door_rows = connection.execute(
+                """
+                SELECT door_no, door_number
+                FROM gate_config_doors
+                WHERE gate_id = ?
+                ORDER BY door_no ASC
+                """,
+                (row["gate_id"],),
+            ).fetchall()
+            doors = [dict(door) for door in door_rows]
+            events.append(
+                {
+                    "id": row["id"],
+                    "gate_id": row["gate_id"],
+                    "gate_code": row["gate_code"],
+                    "door_count": len(doors),
+                    "doors": doors,
+                    "completed_at_utc": row["completed_at_utc"],
+                    "completed_scan_id": row["completed_scan_id"],
+                }
+            )
+        return events
 
 
 INDEX_TEMPLATE = """
@@ -1065,6 +1254,187 @@ OFFICE_TEMPLATE = """
 """
 
 
+ACTION_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Action Page</title>
+  <style>
+    :root {
+      --bg: #eef2ff;
+      --card: #ffffff;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #dbe4ef;
+      --ok: #166534;
+      --ok-bg: #dcfce7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at top right, #dbeafe 0, var(--bg) 48%);
+    }
+    .wrap {
+      max-width: 1080px;
+      margin: 24px auto 28px;
+      padding: 0 14px;
+    }
+    .top {
+      margin-bottom: 14px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+    .muted { color: var(--muted); font-size: 14px; }
+    .status {
+      margin-top: 8px;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .empty {
+      border: 1px dashed #cbd5e1;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.75);
+      padding: 18px;
+      text-align: center;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 10px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border-radius: 999px;
+      background: var(--ok-bg);
+      color: var(--ok);
+      border: 1px solid #86efac;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+    .gate {
+      margin-top: 8px;
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+    }
+    .meta {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .doors {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .chip {
+      border: 1px solid #bfdbfe;
+      background: #eff6ff;
+      color: #1e3a8a;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <h1>Action Page</h1>
+      <div class="muted">Cards appear only when all door QR codes for a gate are scanned.</div>
+      <div id="status" class="status">Refreshing...</div>
+    </div>
+    <div id="empty" class="empty">No completed gate yet.</div>
+    <div id="cards" class="grid"></div>
+  </div>
+
+  <script>
+    const statusBox = document.getElementById('status');
+    const emptyBox = document.getElementById('empty');
+    const cardsBox = document.getElementById('cards');
+
+    function esc(text) {
+      return String(text || '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function renderCards(events) {
+      cardsBox.innerHTML = '';
+      if (!events.length) {
+        emptyBox.style.display = 'block';
+        return;
+      }
+      emptyBox.style.display = 'none';
+
+      events.forEach((event) => {
+        const doors = Array.isArray(event.doors) ? event.doors : [];
+        const chips = doors.map((door) => `<span class="chip">${esc(door.door_number)}</span>`).join('');
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `
+          <span class="badge">Completed</span>
+          <div class="gate">${esc(event.gate_code)}</div>
+          <div class="meta">${esc(event.door_count)} doors scanned</div>
+          <div class="meta">${esc(event.completed_at_utc)}</div>
+          <div class="doors">${chips}</div>
+        `;
+        cardsBox.appendChild(card);
+      });
+    }
+
+    async function refreshActions() {
+      try {
+        const res = await fetch('/api/actions?limit=80');
+        if (!res.ok) {
+          statusBox.textContent = `Failed to refresh (${res.status})`;
+          return;
+        }
+        const events = await res.json();
+        if (!Array.isArray(events)) {
+          statusBox.textContent = 'Unexpected API response';
+          return;
+        }
+        renderCards(events);
+        statusBox.textContent = `Updated at ${new Date().toISOString()}`;
+      } catch (err) {
+        statusBox.textContent = `Refresh error: ${err.message || err}`;
+      }
+    }
+
+    refreshActions();
+    setInterval(refreshActions, 2000);
+  </script>
+</body>
+</html>
+"""
+
+
 GATE_SETUP_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -1513,6 +1883,11 @@ def office():
     return render_template_string(OFFICE_TEMPLATE)
 
 
+@app.route("/action")
+def action_page():
+    return render_template_string(ACTION_TEMPLATE)
+
+
 @app.route("/office/gates")
 def office_gates():
     return render_template_string(GATE_SETUP_TEMPLATE)
@@ -1556,6 +1931,19 @@ def api_gate_summary():
     limit = max(1, min(limit, 5000))
     try:
         return jsonify(list_gate_summary(limit=limit))
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/actions", methods=["GET"])
+def api_actions():
+    try:
+        limit = int(request.args.get("limit", "200"))
+    except ValueError:
+        limit = 200
+    limit = max(1, min(limit, 5000))
+    try:
+        return jsonify(list_action_events(limit=limit))
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
 

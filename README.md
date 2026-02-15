@@ -8,6 +8,7 @@ Simple web app for QR scanning only.
 - Scan history saved in SQLite
 - CSV export of scan logs
 - Office dashboard for backend monitoring (`/office`)
+- Action page (`/action`) that shows completed gate cards only after all doors are scanned
 - Gate setup page for backend officers (`/office/gates`) with two-step flow:
   create gate first, then set 2-6 door numbers
 
@@ -27,6 +28,7 @@ Open:
 - `http://127.0.0.1:5053`
 - `http://127.0.0.1:5053/office`
 - `http://127.0.0.1:5053/office/gates`
+- `http://127.0.0.1:5053/action`
 
 ## Deploy on Render (for phone testing)
 
