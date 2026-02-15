@@ -32,6 +32,11 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def normalize_match_value(value: str) -> str:
+    # Normalize scanner payloads and configured door values so matching is robust.
+    return " ".join(str(value or "").split()).upper()
+
+
 def db_connect():
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
@@ -144,6 +149,7 @@ def add_scan(qr_text: str, source: str):
 
     scanned_at = utc_now_iso()
     normalized_qr = qr_text.strip()
+    match_qr = normalize_match_value(normalized_qr)
     normalized_source = source.strip().upper() or "UNKNOWN"
 
     with db_connect() as connection:
@@ -152,7 +158,7 @@ def add_scan(qr_text: str, source: str):
             (scanned_at, normalized_qr, normalized_source),
         )
         scan_id = cursor.lastrowid
-        process_scan_for_actions(connection, normalized_qr, scan_id, scanned_at)
+        process_scan_for_actions(connection, match_qr, scan_id, scanned_at)
         connection.commit()
 
     return scan_id
@@ -195,7 +201,7 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
         """
         SELECT gate_id, door_no
         FROM gate_config_doors
-        WHERE door_number = ?
+        WHERE UPPER(door_number) = ?
         """,
         (scanned_qr,),
     ).fetchall()
@@ -298,7 +304,7 @@ def validate_door_numbers(door_numbers):
     normalized = []
     seen = set()
     for idx, raw in enumerate(door_numbers, start=1):
-        value = str(raw or "").strip().upper()
+        value = normalize_match_value(raw)
         if not value:
             raise ValueError(f"door number {idx} is required")
         if value in seen:
