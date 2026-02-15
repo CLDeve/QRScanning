@@ -742,7 +742,7 @@ INDEX_TEMPLATE = """
       setScanningState(true);
       setCaptureMode(true);
       setPendingDetection('');
-      setResult('Camera scan started');
+      setResult('Scan Door QR code');
       scanLoop();
     }
 
