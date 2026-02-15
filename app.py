@@ -4,6 +4,7 @@
 import csv
 import io
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 
@@ -34,7 +35,77 @@ def utc_now_iso() -> str:
 
 def normalize_match_value(value: str) -> str:
     # Normalize scanner payloads and configured door values so matching is robust.
-    return " ".join(str(value or "").split()).upper()
+    normalized = " ".join(str(value or "").split()).upper()
+    # Normalize common unicode dash variants to ASCII hyphen.
+    return normalized.translate(
+        {
+            ord("\u2010"): "-",
+            ord("\u2011"): "-",
+            ord("\u2012"): "-",
+            ord("\u2013"): "-",
+            ord("\u2014"): "-",
+            ord("\u2015"): "-",
+            ord("\u2212"): "-",
+        }
+    )
+
+
+def build_match_candidates(value: str):
+    base = normalize_match_value(value)
+    if not base:
+        return []
+
+    forms = {base}
+    compact_dash = re.sub(r"\s*-\s*", "-", base)
+    forms.add(compact_dash)
+    forms.add(compact_dash.replace("-", " - "))
+
+    if "-" in base:
+        parts = [part.strip() for part in base.split("-") if part.strip()]
+        forms.update(parts)
+        if len(parts) >= 2:
+            forms.add(parts[-1])
+
+    door_match = re.search(r"DOOR\s*([A-Z0-9]+)", base)
+    if door_match:
+        number = door_match.group(1)
+        forms.add(f"DOOR {number}")
+        forms.add(f"DOOR{number}")
+        forms.add(number)
+
+    tail_match = re.search(r"([A-Z0-9]+)$", base)
+    if tail_match:
+        forms.add(tail_match.group(1))
+
+    expanded = set()
+    for item in forms:
+        normalized_item = normalize_match_value(item)
+        if normalized_item:
+            expanded.add(normalized_item)
+            expanded.add(normalized_item.replace(" ", ""))
+
+    return sorted(expanded)
+
+
+def build_gate_hints(scanned_qr: str):
+    base = normalize_match_value(scanned_qr)
+    if not base:
+        return []
+
+    hints = set()
+    parts = [normalize_match_value(part) for part in re.split(r"\s*-\s*", base) if normalize_match_value(part)]
+    if parts:
+        first = parts[0]
+        if first and not first.startswith("DOOR"):
+            hints.add(first)
+
+    for token in re.findall(r"\b[A-Z]{1,6}\d[A-Z0-9]*\b", base):
+        normalized_token = normalize_match_value(token)
+        if normalized_token.startswith("DOOR"):
+            continue
+        hints.add(normalized_token)
+
+    return sorted(hints)
 
 
 def db_connect():
@@ -197,14 +268,32 @@ def list_gate_summary(limit: int = 300):
 
 
 def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_at_utc: str):
-    matches = connection.execute(
+    candidates = build_match_candidates(scanned_qr)
+    if not candidates:
+        return
+
+    gate_hints = build_gate_hints(scanned_qr)
+    door_placeholders = ", ".join("?" for _ in candidates)
+    query_params = list(candidates)
+
+    if gate_hints:
+        gate_placeholders = ", ".join("?" for _ in gate_hints)
+        query = f"""
+        SELECT d.gate_id, d.door_no
+        FROM gate_config_doors d
+        JOIN gate_configs g ON g.id = d.gate_id
+        WHERE UPPER(d.door_number) IN ({door_placeholders})
+          AND UPPER(g.gate_code) IN ({gate_placeholders})
         """
+        query_params.extend(gate_hints)
+    else:
+        query = f"""
         SELECT gate_id, door_no
         FROM gate_config_doors
-        WHERE UPPER(door_number) = ?
-        """,
-        (scanned_qr,),
-    ).fetchall()
+        WHERE UPPER(door_number) IN ({door_placeholders})
+        """
+
+    matches = connection.execute(query, query_params).fetchall()
     if not matches:
         return
 
