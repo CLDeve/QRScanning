@@ -39,7 +39,7 @@ This repo includes `render.yaml` and is ready for Render deploy.
 Render will use:
 
 - Build: `pip install -r requirements.txt`
-- Start: `gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4`
+- Start: `python app.py`
 - DB path: `/tmp/qr_scans.db`
 
 After deploy, Render gives an HTTPS URL like:
