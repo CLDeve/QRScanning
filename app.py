@@ -442,7 +442,7 @@ INDEX_TEMPLATE = """
     }
     .control-row {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
     }
     .capture-row {
@@ -469,6 +469,12 @@ INDEX_TEMPLATE = """
     button.capture {
       border-color: rgba(134, 239, 172, 0.9);
       background: linear-gradient(180deg, rgba(34, 197, 94, 0.95), rgba(22, 163, 74, 0.96));
+    }
+    button.capture:disabled {
+      border-color: rgba(148, 163, 184, 0.55);
+      background: rgba(100, 116, 139, 0.7);
+      color: rgba(226, 232, 240, 0.9);
+      cursor: not-allowed;
     }
     button.ghost {
       background: var(--button-soft);
@@ -532,10 +538,10 @@ INDEX_TEMPLATE = """
       <div id="scan-result" class="result">Ready to scan gate code</div>
       <div class="control-row">
         <button id="start-scan" class="primary" type="button">Start</button>
+        <button id="capture-scan" class="capture hidden" type="button" disabled>Capture</button>
         <button id="stop-scan" class="ghost" type="button">Stop</button>
       </div>
       <div class="capture-row">
-        <button id="capture-scan" class="capture hidden" type="button">Capture</button>
         <button id="clear-detected" class="ghost hidden" type="button">Reset</button>
       </div>
 
@@ -548,6 +554,7 @@ INDEX_TEMPLATE = """
     const canvas = document.getElementById('qr-canvas');
     const canvasCtx = canvas.getContext('2d', { willReadFrequently: true });
     const resultBox = document.getElementById('scan-result');
+    const startButton = document.getElementById('start-scan');
     const captureButton = document.getElementById('capture-scan');
     const clearButton = document.getElementById('clear-detected');
     const detectedChip = document.getElementById('detected-chip');
@@ -568,10 +575,18 @@ INDEX_TEMPLATE = """
       document.body.classList.toggle('scanning', isOn);
     }
 
+    function setCaptureMode(showCapture) {
+      startButton.classList.toggle('hidden', showCapture);
+      captureButton.classList.toggle('hidden', !showCapture);
+      if (!showCapture) {
+        captureButton.disabled = true;
+      }
+    }
+
     function setPendingDetection(text) {
       pendingDetectedText = (text || '').trim();
       const hasPending = Boolean(pendingDetectedText);
-      captureButton.classList.toggle('hidden', !hasPending);
+      captureButton.disabled = !hasPending;
       clearButton.classList.toggle('hidden', !hasPending);
       detectedChip.classList.toggle('hidden', !hasPending);
 
@@ -725,6 +740,7 @@ INDEX_TEMPLATE = """
 
       scanning = true;
       setScanningState(true);
+      setCaptureMode(true);
       setPendingDetection('');
       setResult(detectorMode === 'barcode' ? 'Camera scan started' : 'Camera scan started (fallback mode)');
       scanLoop();
@@ -733,6 +749,7 @@ INDEX_TEMPLATE = """
     function stopCameraScan() {
       scanning = false;
       setScanningState(false);
+      setCaptureMode(false);
       setPendingDetection('');
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
@@ -761,6 +778,7 @@ INDEX_TEMPLATE = """
     });
 
     setScanningState(false);
+    setCaptureMode(false);
   </script>
 </body>
 </html>
