@@ -79,6 +79,29 @@ def init_db():
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gate_configs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gate_code TEXT NOT NULL UNIQUE,
+                created_at_utc TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gate_config_doors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gate_id INTEGER NOT NULL,
+                door_no INTEGER NOT NULL,
+                door_number TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL,
+                FOREIGN KEY(gate_id) REFERENCES gate_configs(id) ON DELETE CASCADE,
+                UNIQUE(gate_id, door_no),
+                UNIQUE(gate_id, door_number)
+            )
+            """
+        )
         connection.commit()
 
 
@@ -143,30 +166,31 @@ def validate_door_count(door_count) -> int:
     return count
 
 
-def validate_door_codes(door_codes, expected_count: int):
-    if not isinstance(door_codes, list):
-        raise ValueError("door_codes must be a list")
-    if len(door_codes) != expected_count:
-        raise ValueError(f"door_codes must contain exactly {expected_count} items")
+def validate_door_numbers(door_numbers):
+    if not isinstance(door_numbers, list):
+        raise ValueError("door_numbers must be a list")
 
+    count = len(door_numbers)
+    if count < 2 or count > 6:
+        raise ValueError("door_numbers must contain between 2 and 6 items")
     normalized = []
     seen = set()
-    for idx, raw in enumerate(door_codes, start=1):
-        code = str(raw or "").strip().upper()
-        if not code:
-            raise ValueError(f"door code {idx} is required")
-        if code in seen:
-            raise ValueError("door codes must be unique")
-        seen.add(code)
-        normalized.append(code)
-    return normalized
+    for idx, raw in enumerate(door_numbers, start=1):
+        value = str(raw or "").strip().upper()
+        if not value:
+            raise ValueError(f"door number {idx} is required")
+        if value in seen:
+            raise ValueError("door numbers must be unique for the gate")
+        seen.add(value)
+        normalized.append(value)
+    return count, normalized
 
 
-def fetch_gate_with_doors(connection, gate_id: int):
+def fetch_gate_config_with_doors(connection, gate_id: int):
     gate_row = connection.execute(
         """
-        SELECT id, gate_code, door_count, created_at_utc
-        FROM gates
+        SELECT id, gate_code, created_at_utc
+        FROM gate_configs
         WHERE id = ?
         """,
         (gate_id,),
@@ -176,47 +200,60 @@ def fetch_gate_with_doors(connection, gate_id: int):
 
     door_rows = connection.execute(
         """
-        SELECT door_no, door_code
-        FROM gate_doors
+        SELECT door_no, door_number
+        FROM gate_config_doors
         WHERE gate_id = ?
         ORDER BY door_no ASC
         """,
         (gate_id,),
     ).fetchall()
+    doors = [dict(row) for row in door_rows]
     return {
         "id": gate_row["id"],
         "gate_code": gate_row["gate_code"],
-        "door_count": gate_row["door_count"],
+        "door_count": len(doors),
         "created_at_utc": gate_row["created_at_utc"],
-        "doors": [dict(row) for row in door_rows],
+        "doors": doors,
     }
 
 
-def create_gate(gate_code: str, door_count, door_codes=None):
+def create_gate(gate_code: str):
     code = normalize_gate_code(gate_code)
-    count = validate_door_count(door_count)
-    normalized_door_codes = validate_door_codes(door_codes, count)
     now = utc_now_iso()
-
     with db_connect() as connection:
         cursor = connection.execute(
             """
-            INSERT INTO gates(gate_code, door_count, created_at_utc)
-            VALUES(?, ?, ?)
+            INSERT INTO gate_configs(gate_code, created_at_utc)
+            VALUES(?, ?)
             """,
-            (code, count, now),
+            (code, now),
         )
-        gate_id = cursor.lastrowid
-        for door_no, door_code in enumerate(normalized_door_codes, start=1):
+        connection.commit()
+        return fetch_gate_config_with_doors(connection, cursor.lastrowid)
+
+
+def set_gate_doors(gate_id: int, door_numbers):
+    count, normalized = validate_door_numbers(door_numbers)
+    now = utc_now_iso()
+
+    with db_connect() as connection:
+        existing = fetch_gate_config_with_doors(connection, gate_id)
+        if existing is None:
+            raise ValueError("gate not found")
+
+        connection.execute("DELETE FROM gate_config_doors WHERE gate_id = ?", (gate_id,))
+        for idx, door_number in enumerate(normalized, start=1):
             connection.execute(
                 """
-                INSERT INTO gate_doors(gate_id, door_no, door_code, created_at_utc)
+                INSERT INTO gate_config_doors(gate_id, door_no, door_number, created_at_utc)
                 VALUES(?, ?, ?, ?)
                 """,
-                (gate_id, door_no, door_code, now),
+                (gate_id, idx, door_number, now),
             )
         connection.commit()
-        return fetch_gate_with_doors(connection, gate_id)
+        gate = fetch_gate_config_with_doors(connection, gate_id)
+        gate["door_count"] = count
+        return gate
 
 
 def list_gates(limit: int = 300):
@@ -224,13 +261,13 @@ def list_gates(limit: int = 300):
         gate_rows = connection.execute(
             """
             SELECT id
-            FROM gates
+            FROM gate_configs
             ORDER BY id DESC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
-        return [fetch_gate_with_doors(connection, row["id"]) for row in gate_rows]
+        return [fetch_gate_config_with_doors(connection, row["id"]) for row in gate_rows]
 
 
 INDEX_TEMPLATE = """
@@ -1185,7 +1222,7 @@ GATE_SETUP_TEMPLATE = """
     <div class="top">
       <div>
         <h1>Gate Setup</h1>
-        <div class="muted">Create gates and define your own door codes (2 to 6 doors per gate).</div>
+        <div class="muted">Step 1: create a gate. Step 2: enter door numbers for that gate (2 to 6).</div>
       </div>
       <a href="/office" class="btn">Back to Dashboard</a>
     </div>
@@ -1193,14 +1230,28 @@ GATE_SETUP_TEMPLATE = """
     <div class="grid">
       <div class="card">
         <h2>Create Gate</h2>
-        <div id="status" class="status">Ready</div>
+        <div id="create-status" class="status">Ready</div>
         <form id="create-gate-form">
           <div class="field">
             <label for="gate-code">Gate Code</label>
             <input id="gate-code" placeholder="e.g. G12" required>
           </div>
+          <button class="btn primary" type="submit">Create Gate</button>
+        </form>
+
+        <hr style="border:0;border-top:1px solid var(--border);margin:14px 0;">
+
+        <h2 style="margin-top:0;">Set Door Numbers</h2>
+        <div id="doors-status" class="status">Select a gate and set its doors.</div>
+        <form id="set-doors-form">
           <div class="field">
-            <label for="door-count">Doors</label>
+            <label for="gate-select">Gate</label>
+            <select id="gate-select" required>
+              <option value="">Select gate</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="door-count">Number of Doors</label>
             <select id="door-count" required>
               <option value="2">2 doors</option>
               <option value="3">3 doors</option>
@@ -1210,10 +1261,10 @@ GATE_SETUP_TEMPLATE = """
             </select>
           </div>
           <div class="field">
-            <label>Door Codes</label>
+            <label>Door Numbers</label>
             <div id="door-fields" class="door-list"></div>
           </div>
-          <button class="btn primary" type="submit">Create Gate</button>
+          <button class="btn primary" type="submit">Save Doors</button>
         </form>
       </div>
 
@@ -1224,7 +1275,7 @@ GATE_SETUP_TEMPLATE = """
             <tr>
               <th>Gate</th>
               <th>Doors</th>
-              <th>Door Codes</th>
+              <th>Door Numbers</th>
               <th>Created At (UTC)</th>
             </tr>
           </thead>
@@ -1236,11 +1287,15 @@ GATE_SETUP_TEMPLATE = """
 
   <script>
     const gateRows = document.getElementById('gate-rows');
-    const statusBox = document.getElementById('status');
-    const form = document.getElementById('create-gate-form');
+    const createStatusBox = document.getElementById('create-status');
+    const doorsStatusBox = document.getElementById('doors-status');
+    const createGateForm = document.getElementById('create-gate-form');
+    const setDoorsForm = document.getElementById('set-doors-form');
     const gateCodeInput = document.getElementById('gate-code');
+    const gateSelect = document.getElementById('gate-select');
     const doorCountInput = document.getElementById('door-count');
     const doorFields = document.getElementById('door-fields');
+    let gateCache = [];
 
     function esc(text) {
       return String(text || '')
@@ -1251,19 +1306,32 @@ GATE_SETUP_TEMPLATE = """
         .replaceAll("'", '&#39;');
     }
 
-    function setStatus(text, isError = false) {
-      statusBox.textContent = text;
-      statusBox.className = isError ? 'status err' : 'status';
+    function setCreateStatus(text, isError = false) {
+      createStatusBox.textContent = text;
+      createStatusBox.className = isError ? 'status err' : 'status';
+    }
+
+    function setDoorsStatus(text, isError = false) {
+      doorsStatusBox.textContent = text;
+      doorsStatusBox.className = isError ? 'status err' : 'status';
     }
 
     function normalizeGateCode(value) {
       return String(value || '').trim().toUpperCase();
     }
 
-    function buildDoorInputs() {
-      const gateCode = normalizeGateCode(gateCodeInput.value) || 'GATE';
+    function getSelectedGate() {
+      const selectedId = Number(gateSelect.value);
+      if (!selectedId) {
+        return null;
+      }
+      return gateCache.find((gate) => Number(gate.id) === selectedId) || null;
+    }
+
+    function buildDoorInputs(initialValues = null) {
       const doorCount = Number(doorCountInput.value);
       const previousValues = Array.from(doorFields.querySelectorAll('input')).map((el) => el.value);
+      const seedValues = Array.isArray(initialValues) ? initialValues : previousValues;
       doorFields.innerHTML = '';
 
       for (let i = 1; i <= doorCount; i += 1) {
@@ -1278,8 +1346,8 @@ GATE_SETUP_TEMPLATE = """
         input.type = 'text';
         input.required = true;
         input.dataset.doorNo = String(i);
-        input.placeholder = `${gateCode}-D${i}`;
-        input.value = previousValues[i - 1] || `${gateCode}-D${i}`;
+        input.placeholder = `Door ${i}`;
+        input.value = seedValues[i - 1] || '';
 
         wrap.appendChild(tag);
         wrap.appendChild(input);
@@ -1291,7 +1359,7 @@ GATE_SETUP_TEMPLATE = """
       gateRows.innerHTML = '';
       gates.forEach((gate) => {
         const doors = Array.isArray(gate.doors) ? gate.doors : [];
-        const chips = doors.map((door) => `<span class="chip">${esc(door.door_code)}</span>`).join('');
+        const chips = doors.map((door) => `<span class="chip">${esc(door.door_number)}</span>`).join('');
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td class="mono">${esc(gate.gate_code)}</td>
@@ -1303,51 +1371,112 @@ GATE_SETUP_TEMPLATE = """
       });
     }
 
+    function renderGateSelect(gates) {
+      const selectedBefore = gateSelect.value;
+      gateSelect.innerHTML = '<option value="">Select gate</option>';
+      gates.forEach((gate) => {
+        const option = document.createElement('option');
+        option.value = String(gate.id);
+        option.textContent = gate.gate_code;
+        gateSelect.appendChild(option);
+      });
+
+      if (selectedBefore && gates.some((gate) => String(gate.id) === selectedBefore)) {
+        gateSelect.value = selectedBefore;
+      } else if (gates.length > 0) {
+        gateSelect.value = String(gates[0].id);
+      }
+    }
+
+    function syncDoorEditorFromSelectedGate() {
+      const gate = getSelectedGate();
+      if (!gate) {
+        doorCountInput.value = '2';
+        buildDoorInputs();
+        return;
+      }
+      const doors = Array.isArray(gate.doors) ? gate.doors : [];
+      if (doors.length >= 2 && doors.length <= 6) {
+        doorCountInput.value = String(doors.length);
+      }
+      buildDoorInputs(doors.map((door) => door.door_number));
+    }
+
     async function refreshGates() {
       const res = await fetch('/api/gates?limit=500');
       if (!res.ok) {
-        setStatus(`Failed to load gates (${res.status})`, true);
+        setDoorsStatus(`Failed to load gates (${res.status})`, true);
         return;
       }
       const gates = await res.json();
       if (!Array.isArray(gates)) {
-        setStatus('Unexpected gate list response', true);
+        setDoorsStatus('Unexpected gate list response', true);
         return;
       }
+      gateCache = gates;
       renderGateRows(gates);
-      setStatus(`Loaded ${gates.length} gates`);
+      renderGateSelect(gates);
+      syncDoorEditorFromSelectedGate();
+      setDoorsStatus(`Loaded ${gates.length} gates`);
     }
 
-    form.addEventListener('submit', async (event) => {
+    createGateForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const gateCode = normalizeGateCode(gateCodeInput.value);
-      const doorCount = Number(doorCountInput.value);
       if (!gateCode) {
-        setStatus('Gate code is required', true);
+        setCreateStatus('Gate code is required', true);
         return;
       }
-      const doorCodes = Array.from(doorFields.querySelectorAll('input')).map((el) => el.value.trim());
 
       const res = await fetch('/api/gates', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gate_code: gateCode, door_count: doorCount, door_codes: doorCodes }),
+        body: JSON.stringify({ gate_code: gateCode }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setStatus(data.error || `Create gate failed (${res.status})`, true);
+        setCreateStatus(data.error || `Create gate failed (${res.status})`, true);
         return;
       }
 
       gateCodeInput.value = '';
-      doorCountInput.value = '4';
-      buildDoorInputs();
-      setStatus(`Created gate ${data.gate_code} with ${data.door_count} doors`);
+      setCreateStatus(`Created gate ${data.gate_code}`);
       await refreshGates();
+      gateSelect.value = String(data.id);
+      syncDoorEditorFromSelectedGate();
     });
 
-    gateCodeInput.addEventListener('input', buildDoorInputs);
-    doorCountInput.addEventListener('change', buildDoorInputs);
+    setDoorsForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const gate = getSelectedGate();
+      if (!gate) {
+        setDoorsStatus('Please select a gate first', true);
+        return;
+      }
+
+      const doorNumbers = Array.from(doorFields.querySelectorAll('input')).map((el) => el.value.trim());
+      const res = await fetch(`/api/gates/${gate.id}/doors`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ door_numbers: doorNumbers }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setDoorsStatus(data.error || `Save doors failed (${res.status})`, true);
+        return;
+      }
+
+      setDoorsStatus(`Saved ${data.door_count} doors for gate ${data.gate_code}`);
+      await refreshGates();
+      gateSelect.value = String(data.id);
+      syncDoorEditorFromSelectedGate();
+    });
+
+    gateSelect.addEventListener('change', syncDoorEditorFromSelectedGate);
+    doorCountInput.addEventListener('change', () => buildDoorInputs());
+    gateCodeInput.addEventListener('input', () => {
+      gateCodeInput.value = normalizeGateCode(gateCodeInput.value);
+    });
     buildDoorInputs();
     refreshGates();
   </script>
@@ -1430,21 +1559,33 @@ def api_gates():
 def api_create_gate():
     payload = request.get_json(silent=True) or {}
     gate_code = payload.get("gate_code", "")
-    door_count = payload.get("door_count", "")
-    door_codes = payload.get("door_codes", [])
 
     try:
-        gate = create_gate(gate_code, door_count, door_codes=door_codes)
+        gate = create_gate(gate_code)
         return jsonify(gate), 201
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except sqlite3.IntegrityError as exc:
         msg = str(exc).lower()
-        if "gates.gate_code" in msg:
+        if "gate_configs.gate_code" in msg:
             return jsonify({"error": "gate_code already exists"}), 409
-        if "gate_doors.door_code" in msg:
-            return jsonify({"error": "door_code already exists"}), 409
         return jsonify({"error": "integrity constraint failed"}), 409
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/gates/<int:gate_id>/doors", methods=["POST"])
+def api_set_gate_doors(gate_id: int):
+    payload = request.get_json(silent=True) or {}
+    door_numbers = payload.get("door_numbers", [])
+
+    try:
+        gate = set_gate_doors(gate_id, door_numbers)
+        return jsonify(gate)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except sqlite3.IntegrityError:
+        return jsonify({"error": "door number already exists for this gate"}), 409
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
 

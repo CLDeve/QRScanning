@@ -8,7 +8,8 @@ Simple web app for QR scanning only.
 - Scan history saved in SQLite
 - CSV export of scan logs
 - Office dashboard for backend monitoring (`/office`)
-- Gate setup page for backend officers (`/office/gates`) with 2-6 custom door codes per gate
+- Gate setup page for backend officers (`/office/gates`) with two-step flow:
+  create gate first, then set 2-6 door numbers
 
 ## Local Run
 
