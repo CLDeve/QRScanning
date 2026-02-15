@@ -232,11 +232,15 @@ def init_db():
                 gate_id INTEGER NOT NULL,
                 completed_scan_id INTEGER NOT NULL,
                 completed_at_utc TEXT NOT NULL,
+                closed_at_utc TEXT,
                 FOREIGN KEY(gate_id) REFERENCES gate_configs(id) ON DELETE CASCADE,
                 UNIQUE(gate_id, completed_scan_id)
             )
             """
         )
+        action_event_columns = connection.execute("PRAGMA table_info(action_events)").fetchall()
+        if not any(row["name"] == "closed_at_utc" for row in action_event_columns):
+            connection.execute("ALTER TABLE action_events ADD COLUMN closed_at_utc TEXT")
         connection.commit()
 
 
@@ -547,18 +551,21 @@ def list_gates(limit: int = 300):
         return [fetch_gate_config_with_doors(connection, row["id"]) for row in gate_rows]
 
 
-def list_action_events(limit: int = 200):
+def list_action_events(limit: int = 200, include_closed: bool = False):
     with db_connect() as connection:
+        where_clause = "" if include_closed else "WHERE e.closed_at_utc IS NULL"
         rows = connection.execute(
-            """
+            f"""
             SELECT
                 e.id,
                 e.completed_at_utc,
                 e.completed_scan_id,
+                e.closed_at_utc,
                 g.id AS gate_id,
                 g.gate_code
             FROM action_events e
             JOIN gate_configs g ON g.id = e.gate_id
+            {where_clause}
             ORDER BY e.id DESC
             LIMIT ?
             """,
@@ -586,10 +593,27 @@ def list_action_events(limit: int = 200):
                     "doors": doors,
                     "completed_at_utc": row["completed_at_utc"],
                     "completed_at_sgt": format_iso_utc_to_sgt(row["completed_at_utc"]),
+                    "closed_at_utc": row["closed_at_utc"],
+                    "closed_at_sgt": format_iso_utc_to_sgt(row["closed_at_utc"]),
                     "completed_scan_id": row["completed_scan_id"],
                 }
             )
         return events
+
+
+def close_action_event(event_id: int):
+    closed_at = utc_now_iso()
+    with db_connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE action_events
+            SET closed_at_utc = ?
+            WHERE id = ? AND closed_at_utc IS NULL
+            """,
+            (closed_at, event_id),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
 
 
 INDEX_TEMPLATE = """
@@ -1538,6 +1562,25 @@ ACTION_TEMPLATE = """
       font-size: 12px;
       font-weight: 700;
     }
+    .card-actions {
+      margin-top: 12px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .close-btn {
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      color: #0f172a;
+      border-radius: 999px;
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .close-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -1565,6 +1608,30 @@ ACTION_TEMPLATE = """
         .replaceAll("'", '&#39;');
     }
 
+    function formatSgtDateTimeFromDate(value) {
+      const date = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return String(value || '-');
+      }
+      const parts = new Intl.DateTimeFormat('en-SG', {
+        timeZone: 'Asia/Singapore',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).formatToParts(date);
+      const map = {};
+      parts.forEach((part) => {
+        if (part.type !== 'literal') {
+          map[part.type] = part.value;
+        }
+      });
+      return `${map.day}-${map.month}-${map.year} ${map.hour}:${map.minute}:${map.second} SGT`;
+    }
+
     function renderCards(events) {
       cardsBox.innerHTML = '';
       if (!events.length) {
@@ -1584,9 +1651,34 @@ ACTION_TEMPLATE = """
           <div class="meta">${esc(event.door_count)} doors scanned</div>
           <div class="meta">${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</div>
           <div class="doors">${chips}</div>
+          <div class="card-actions">
+            <button class="close-btn" data-action-id="${esc(event.id)}" type="button">Closed</button>
+          </div>
         `;
         cardsBox.appendChild(card);
       });
+    }
+
+    async function closeEvent(eventId, buttonEl) {
+      buttonEl.disabled = true;
+      let res;
+      try {
+        res = await fetch(`/api/actions/${eventId}/close`, { method: 'POST' });
+      } catch (err) {
+        buttonEl.disabled = false;
+        statusBox.textContent = `Close failed: ${err.message || err}`;
+        return;
+      }
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        buttonEl.disabled = false;
+        statusBox.textContent = data.error || `Close failed (${res.status})`;
+        return;
+      }
+
+      statusBox.textContent = `Closed at ${formatSgtDateTimeFromDate(new Date())}`;
+      await refreshActions();
     }
 
     async function refreshActions() {
@@ -1607,6 +1699,18 @@ ACTION_TEMPLATE = """
         statusBox.textContent = `Refresh error: ${err.message || err}`;
       }
     }
+
+    cardsBox.addEventListener('click', async (event) => {
+      const button = event.target.closest('.close-btn');
+      if (!button) {
+        return;
+      }
+      const actionId = Number(button.dataset.actionId);
+      if (!actionId) {
+        return;
+      }
+      await closeEvent(actionId, button);
+    });
 
     refreshActions();
     setInterval(refreshActions, 2000);
@@ -2123,10 +2227,23 @@ def api_actions():
     except ValueError:
         limit = 200
     limit = max(1, min(limit, 5000))
+    include_closed = str(request.args.get("include_closed", "")).strip().lower() in {"1", "true", "yes"}
     try:
-        return jsonify(list_action_events(limit=limit))
+        return jsonify(list_action_events(limit=limit, include_closed=include_closed))
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/actions/<int:event_id>/close", methods=["POST"])
+def api_close_action(event_id: int):
+    try:
+        updated = close_action_event(event_id)
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+    if not updated:
+        return jsonify({"error": "action event not found or already closed"}), 404
+    return jsonify({"ok": True})
 
 
 @app.route("/api/gates", methods=["GET"])
