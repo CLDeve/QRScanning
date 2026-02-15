@@ -6,7 +6,7 @@ import io
 import os
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
@@ -31,6 +31,32 @@ app = Flask(__name__)
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def format_iso_utc_to_sgt(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        dt_utc = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return raw
+    dt_sgt = dt_utc + timedelta(hours=8)
+    month_abbr = (
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    )[dt_sgt.month - 1]
+    return f"{dt_sgt.day:02d}-{month_abbr}-{dt_sgt.year:04d} {dt_sgt:%H:%M:%S} SGT"
 
 
 def normalize_match_value(value: str) -> str:
@@ -246,7 +272,12 @@ def list_scans(limit: int = 300):
             """,
             (limit,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    scans = []
+    for row in rows:
+        item = dict(row)
+        item["scanned_at_sgt"] = format_iso_utc_to_sgt(item.get("scanned_at_utc"))
+        scans.append(item)
+    return scans
 
 
 def list_gate_summary(limit: int = 300):
@@ -264,7 +295,12 @@ def list_gate_summary(limit: int = 300):
             """,
             (limit,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    summary = []
+    for row in rows:
+        item = dict(row)
+        item["last_scanned_at_sgt"] = format_iso_utc_to_sgt(item.get("last_scanned_at_utc"))
+        summary.append(item)
+    return summary
 
 
 def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_at_utc: str):
@@ -430,6 +466,7 @@ def fetch_gate_config_with_doors(connection, gate_id: int):
         "gate_code": gate_row["gate_code"],
         "door_count": len(doors),
         "created_at_utc": gate_row["created_at_utc"],
+        "created_at_sgt": format_iso_utc_to_sgt(gate_row["created_at_utc"]),
         "doors": doors,
     }
 
@@ -548,6 +585,7 @@ def list_action_events(limit: int = 200):
                     "door_count": len(doors),
                     "doors": doors,
                     "completed_at_utc": row["completed_at_utc"],
+                    "completed_at_sgt": format_iso_utc_to_sgt(row["completed_at_utc"]),
                     "completed_scan_id": row["completed_scan_id"],
                 }
             )
@@ -1225,7 +1263,7 @@ OFFICE_TEMPLATE = """
         <div class="kpi-value" id="kpi-gates">0</div>
       </div>
       <div class="card">
-        <div class="kpi-title">Last Scan (UTC)</div>
+        <div class="kpi-title">Last Scan (SGT)</div>
         <div class="kpi-value" id="kpi-last" style="font-size:18px;">-</div>
       </div>
     </div>
@@ -1240,7 +1278,7 @@ OFFICE_TEMPLATE = """
             <tr>
               <th>Gate</th>
               <th>Total Scans</th>
-              <th>Last Scanned (UTC)</th>
+              <th>Last Scanned (SGT)</th>
             </tr>
           </thead>
           <tbody id="gate-rows"></tbody>
@@ -1252,7 +1290,7 @@ OFFICE_TEMPLATE = """
         <table>
           <thead>
             <tr>
-              <th>Time (UTC)</th>
+              <th>Time (SGT)</th>
               <th>Gate</th>
               <th>Source</th>
             </tr>
@@ -1278,6 +1316,54 @@ OFFICE_TEMPLATE = """
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }
+
+    function formatSgtDateTimeFromDate(value) {
+      const date = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return String(value || '-');
+      }
+      const parts = new Intl.DateTimeFormat('en-SG', {
+        timeZone: 'Asia/Singapore',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).formatToParts(date);
+      const map = {};
+      parts.forEach((part) => {
+        if (part.type !== 'literal') {
+          map[part.type] = part.value;
+        }
+      });
+      return `${map.day}-${map.month}-${map.year} ${map.hour}:${map.minute}:${map.second} SGT`;
+    }
+
+    function formatSgtDateTimeFromDate(value) {
+      const date = value instanceof Date ? value : new Date(value);
+      if (Number.isNaN(date.getTime())) {
+        return String(value || '-');
+      }
+      const parts = new Intl.DateTimeFormat('en-SG', {
+        timeZone: 'Asia/Singapore',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).formatToParts(date);
+      const map = {};
+      parts.forEach((part) => {
+        if (part.type !== 'literal') {
+          map[part.type] = part.value;
+        }
+      });
+      return `${map.day}-${map.month}-${map.year} ${map.hour}:${map.minute}:${map.second} SGT`;
     }
 
     function setStatus(text, isError = false) {
@@ -1311,7 +1397,7 @@ OFFICE_TEMPLATE = """
         });
         kpiTotal.textContent = String(totalScans);
         kpiGates.textContent = String(summary.length);
-        kpiLast.textContent = scans.length > 0 ? scans[0].scanned_at_utc : '-';
+        kpiLast.textContent = scans.length > 0 ? (scans[0].scanned_at_sgt || scans[0].scanned_at_utc || '-') : '-';
 
         gateRows.innerHTML = '';
         summary.forEach((row) => {
@@ -1319,7 +1405,7 @@ OFFICE_TEMPLATE = """
           tr.innerHTML = `
             <td class="mono">${esc(row.gate_code)}</td>
             <td>${esc(row.scan_count)}</td>
-            <td>${esc(row.last_scanned_at_utc)}</td>
+            <td>${esc(row.last_scanned_at_sgt || row.last_scanned_at_utc || '-')}</td>
           `;
           gateRows.appendChild(tr);
         });
@@ -1328,14 +1414,14 @@ OFFICE_TEMPLATE = """
         scans.slice(0, 40).forEach((row) => {
           const tr = document.createElement('tr');
           tr.innerHTML = `
-            <td>${esc(row.scanned_at_utc)}</td>
+            <td>${esc(row.scanned_at_sgt || row.scanned_at_utc || '-')}</td>
             <td class="mono">${esc(row.qr_text)}</td>
             <td>${esc(row.source)}</td>
           `;
           scanRows.appendChild(tr);
         });
 
-        setStatus(`Updated at ${new Date().toISOString()}`);
+        setStatus(`Updated at ${formatSgtDateTimeFromDate(new Date())}`);
       } catch (err) {
         setStatus(`Refresh error: ${err.message || err}`, true);
       }
@@ -1496,7 +1582,7 @@ ACTION_TEMPLATE = """
           <span class="badge">Completed</span>
           <div class="gate">${esc(event.gate_code)}</div>
           <div class="meta">${esc(event.door_count)} doors scanned</div>
-          <div class="meta">${esc(event.completed_at_utc)}</div>
+          <div class="meta">${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</div>
           <div class="doors">${chips}</div>
         `;
         cardsBox.appendChild(card);
@@ -1516,7 +1602,7 @@ ACTION_TEMPLATE = """
           return;
         }
         renderCards(events);
-        statusBox.textContent = `Updated at ${new Date().toISOString()}`;
+        statusBox.textContent = `Updated at ${formatSgtDateTimeFromDate(new Date())}`;
       } catch (err) {
         statusBox.textContent = `Refresh error: ${err.message || err}`;
       }
@@ -1759,7 +1845,7 @@ GATE_SETUP_TEMPLATE = """
               <th>Gate</th>
               <th>Doors</th>
               <th>Door Numbers</th>
-              <th>Created At (UTC)</th>
+              <th>Created At (SGT)</th>
             </tr>
           </thead>
           <tbody id="gate-rows"></tbody>
@@ -1848,7 +1934,7 @@ GATE_SETUP_TEMPLATE = """
           <td class="mono">${esc(gate.gate_code)}</td>
           <td>${esc(gate.door_count)}</td>
           <td><div class="chips">${chips}</div></td>
-          <td>${esc(gate.created_at_utc)}</td>
+          <td>${esc(gate.created_at_sgt || gate.created_at_utc || '-')}</td>
         `;
         gateRows.appendChild(tr);
       });
@@ -2095,14 +2181,14 @@ def api_set_gate_doors(gate_id: int):
 def api_export_csv():
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["id", "scanned_at_utc", "qr_text", "source"])
+    writer.writerow(["id", "scanned_at_sgt", "qr_text", "source"])
 
     try:
         rows = list_scans(limit=200000)
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
     for row in reversed(rows):
-        writer.writerow([row["id"], row["scanned_at_utc"], row["qr_text"], row["source"]])
+        writer.writerow([row["id"], row["scanned_at_sgt"], row["qr_text"], row["source"]])
 
     return Response(
         output.getvalue(),
