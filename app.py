@@ -210,8 +210,21 @@ def init_db():
                 gate_id INTEGER PRIMARY KEY,
                 last_completed_scan_id INTEGER NOT NULL DEFAULT 0,
                 updated_at_utc TEXT NOT NULL,
+                next_expected_door_no INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY(gate_id) REFERENCES gate_configs(id) ON DELETE CASCADE
             )
+            """
+        )
+        gate_cycle_state_columns = connection.execute("PRAGMA table_info(gate_cycle_state)").fetchall()
+        if not any(row["name"] == "next_expected_door_no" for row in gate_cycle_state_columns):
+            connection.execute(
+                "ALTER TABLE gate_cycle_state ADD COLUMN next_expected_door_no INTEGER NOT NULL DEFAULT 1"
+            )
+        connection.execute(
+            """
+            UPDATE gate_cycle_state
+            SET next_expected_door_no = 1
+            WHERE next_expected_door_no IS NULL OR next_expected_door_no < 1
             """
         )
         connection.execute(
@@ -337,34 +350,31 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
     if not matches:
         return
 
-    gate_ids = set()
+    matches_by_gate = {}
     for row in matches:
         gate_id = row["gate_id"]
-        gate_ids.add(gate_id)
+        matches_by_gate.setdefault(gate_id, set()).add(int(row["door_no"]))
         connection.execute(
             """
-            INSERT OR IGNORE INTO gate_cycle_state(gate_id, last_completed_scan_id, updated_at_utc)
-            VALUES(?, 0, ?)
+            INSERT OR IGNORE INTO gate_cycle_state(
+                gate_id, last_completed_scan_id, updated_at_utc, next_expected_door_no
+            )
+            VALUES(?, 0, ?, 1)
             """,
             (gate_id, scanned_at_utc),
         )
-        connection.execute(
-            """
-            INSERT INTO gate_cycle_door_state(gate_id, door_no, last_scan_id)
-            VALUES(?, ?, ?)
-            ON CONFLICT(gate_id, door_no) DO UPDATE SET last_scan_id = excluded.last_scan_id
-            """,
-            (gate_id, row["door_no"], scan_id),
-        )
 
-    for gate_id in gate_ids:
+    for gate_id, matched_door_nos in matches_by_gate.items():
         state_row = connection.execute(
-            "SELECT last_completed_scan_id FROM gate_cycle_state WHERE gate_id = ?",
+            """
+            SELECT last_completed_scan_id, next_expected_door_no
+            FROM gate_cycle_state
+            WHERE gate_id = ?
+            """,
             (gate_id,),
         ).fetchone()
         if state_row is None:
             continue
-        last_completed_scan_id = int(state_row["last_completed_scan_id"] or 0)
 
         required_doors = connection.execute(
             """
@@ -378,31 +388,78 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
         if not required_doors:
             continue
 
-        door_scan_rows = connection.execute(
-            """
-            SELECT door_no, last_scan_id
-            FROM gate_cycle_door_state
-            WHERE gate_id = ?
-            """,
-            (gate_id,),
-        ).fetchall()
-        door_scan_map = {row["door_no"]: int(row["last_scan_id"] or 0) for row in door_scan_rows}
+        required_count = len(required_doors)
+        expected_index = int(state_row["next_expected_door_no"] or 1)
+        if expected_index < 1 or expected_index > required_count:
+            expected_index = 1
+        expected_door_no = int(required_doors[expected_index - 1]["door_no"])
+        first_door_no = int(required_doors[0]["door_no"])
 
-        if all(door_scan_map.get(row["door_no"], 0) > last_completed_scan_id for row in required_doors):
+        if expected_door_no in matched_door_nos:
             connection.execute(
                 """
-                INSERT OR IGNORE INTO action_events(gate_id, completed_scan_id, completed_at_utc)
+                INSERT INTO gate_cycle_door_state(gate_id, door_no, last_scan_id)
                 VALUES(?, ?, ?)
+                ON CONFLICT(gate_id, door_no) DO UPDATE SET last_scan_id = excluded.last_scan_id
                 """,
-                (gate_id, scan_id, scanned_at_utc),
+                (gate_id, expected_door_no, scan_id),
+            )
+            if expected_index >= required_count:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO action_events(gate_id, completed_scan_id, completed_at_utc)
+                    VALUES(?, ?, ?)
+                    """,
+                    (gate_id, scan_id, scanned_at_utc),
+                )
+                connection.execute(
+                    """
+                    UPDATE gate_cycle_state
+                    SET last_completed_scan_id = ?, updated_at_utc = ?, next_expected_door_no = 1
+                    WHERE gate_id = ?
+                    """,
+                    (scan_id, scanned_at_utc, gate_id),
+                )
+                connection.execute("DELETE FROM gate_cycle_door_state WHERE gate_id = ?", (gate_id,))
+            else:
+                connection.execute(
+                    """
+                    UPDATE gate_cycle_state
+                    SET updated_at_utc = ?, next_expected_door_no = ?
+                    WHERE gate_id = ?
+                    """,
+                    (scanned_at_utc, expected_index + 1, gate_id),
+                )
+            continue
+
+        # Wrong order: reset sequence progress for this gate.
+        connection.execute("DELETE FROM gate_cycle_door_state WHERE gate_id = ?", (gate_id,))
+
+        if first_door_no in matched_door_nos:
+            connection.execute(
+                """
+                INSERT INTO gate_cycle_door_state(gate_id, door_no, last_scan_id)
+                VALUES(?, ?, ?)
+                ON CONFLICT(gate_id, door_no) DO UPDATE SET last_scan_id = excluded.last_scan_id
+                """,
+                (gate_id, first_door_no, scan_id),
             )
             connection.execute(
                 """
                 UPDATE gate_cycle_state
-                SET last_completed_scan_id = ?, updated_at_utc = ?
+                SET updated_at_utc = ?, next_expected_door_no = ?
                 WHERE gate_id = ?
                 """,
-                (scan_id, scanned_at_utc, gate_id),
+                (scanned_at_utc, 2, gate_id),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE gate_cycle_state
+                SET updated_at_utc = ?, next_expected_door_no = 1
+                WHERE gate_id = ?
+                """,
+                (scanned_at_utc, gate_id),
             )
 
 
@@ -488,8 +545,10 @@ def create_gate(gate_code: str):
         )
         connection.execute(
             """
-            INSERT OR IGNORE INTO gate_cycle_state(gate_id, last_completed_scan_id, updated_at_utc)
-            VALUES(?, 0, ?)
+            INSERT OR IGNORE INTO gate_cycle_state(
+                gate_id, last_completed_scan_id, updated_at_utc, next_expected_door_no
+            )
+            VALUES(?, 0, ?, 1)
             """,
             (cursor.lastrowid, now),
         )
@@ -510,15 +569,17 @@ def set_gate_doors(gate_id: int, door_numbers):
         connection.execute("DELETE FROM gate_cycle_door_state WHERE gate_id = ?", (gate_id,))
         connection.execute(
             """
-            INSERT OR IGNORE INTO gate_cycle_state(gate_id, last_completed_scan_id, updated_at_utc)
-            VALUES(?, 0, ?)
+            INSERT OR IGNORE INTO gate_cycle_state(
+                gate_id, last_completed_scan_id, updated_at_utc, next_expected_door_no
+            )
+            VALUES(?, 0, ?, 1)
             """,
             (gate_id, now),
         )
         connection.execute(
             """
             UPDATE gate_cycle_state
-            SET last_completed_scan_id = 0, updated_at_utc = ?
+            SET last_completed_scan_id = 0, updated_at_utc = ?, next_expected_door_no = 1
             WHERE gate_id = ?
             """,
             (now, gate_id),
@@ -1895,7 +1956,7 @@ GATE_SETUP_TEMPLATE = """
     <div class="top">
       <div>
         <h1>Gate Setup</h1>
-        <div class="muted">Step 1: create a gate. Step 2: enter door numbers for that gate (2 to 6).</div>
+        <div class="muted">Step 1: create a gate. Step 2: enter door numbers in required scan sequence (Door 1, then Door 2, etc.).</div>
       </div>
       <a href="/office" class="btn">Back to Dashboard</a>
     </div>
@@ -1915,7 +1976,7 @@ GATE_SETUP_TEMPLATE = """
         <hr style="border:0;border-top:1px solid var(--border);margin:14px 0;">
 
         <h2 style="margin-top:0;">Set Door Numbers</h2>
-        <div id="doors-status" class="status">Select a gate and set its doors.</div>
+        <div id="doors-status" class="status">Select a gate and set its doors. Action card appears only if scanned in this sequence.</div>
         <form id="set-doors-form">
           <div class="field">
             <label for="gate-select">Gate</label>
@@ -2032,7 +2093,7 @@ GATE_SETUP_TEMPLATE = """
       gateRows.innerHTML = '';
       gates.forEach((gate) => {
         const doors = Array.isArray(gate.doors) ? gate.doors : [];
-        const chips = doors.map((door) => `<span class="chip">${esc(door.door_number)}</span>`).join('');
+        const chips = doors.map((door) => `<span class="chip">#${esc(door.door_no)} ${esc(door.door_number)}</span>`).join('');
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td class="mono">${esc(gate.gate_code)}</td>
