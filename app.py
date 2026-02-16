@@ -2054,6 +2054,11 @@ GATE_SETUP_TEMPLATE = """
       return String(value || '').trim().toUpperCase();
     }
 
+    function ordinalWord(index) {
+      const words = ['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth'];
+      return words[index - 1] || `${index}th`;
+    }
+
     function getSelectedGate() {
       const selectedId = Number(gateSelect.value);
       if (!selectedId) {
@@ -2074,13 +2079,13 @@ GATE_SETUP_TEMPLATE = """
 
         const tag = document.createElement('div');
         tag.className = 'door-tag';
-        tag.textContent = `Door ${i}`;
+        tag.textContent = `Scan ${ordinalWord(i)} Door`;
 
         const input = document.createElement('input');
         input.type = 'text';
         input.required = true;
         input.dataset.doorNo = String(i);
-        input.placeholder = `Door ${i}`;
+        input.placeholder = `${ordinalWord(i)} door QR`;
         input.value = seedValues[i - 1] || '';
 
         wrap.appendChild(tag);
