@@ -123,13 +123,31 @@ def build_gate_hints(scanned_qr: str):
     if parts:
         first = parts[0]
         if first and not first.startswith("DOOR"):
-            hints.add(first)
+            gate_part_match = re.match(r"^GATE\s*([A-Z0-9]+)$", first)
+            if gate_part_match:
+                gate_suffix = normalize_match_value(gate_part_match.group(1)).replace(" ", "")
+                if gate_suffix:
+                    hints.add(f"G{gate_suffix}")
+                    hints.add(f"GATE{gate_suffix}")
+                    hints.add(f"GATE {gate_suffix}")
+                    hints.add(gate_suffix)
+            elif re.match(r"^[A-Z]{1,6}\d[A-Z0-9]*$", first):
+                hints.add(first)
 
     for token in re.findall(r"\b[A-Z]{1,6}\d[A-Z0-9]*\b", base):
         normalized_token = normalize_match_value(token)
         if normalized_token.startswith("DOOR"):
             continue
         hints.add(normalized_token)
+
+    for gate_suffix in re.findall(r"\bGATE\s*[- ]*\s*([A-Z0-9]+)\b", base):
+        normalized_suffix = normalize_match_value(gate_suffix).replace(" ", "")
+        if not normalized_suffix:
+            continue
+        hints.add(f"G{normalized_suffix}")
+        hints.add(f"GATE{normalized_suffix}")
+        hints.add(f"GATE {normalized_suffix}")
+        hints.add(normalized_suffix)
 
     return sorted(hints)
 
