@@ -93,6 +93,16 @@ def build_match_candidates(value: str):
         return []
 
     forms = {base}
+
+    def add_numeric_variants(token: str):
+        normalized = normalize_match_value(token)
+        if not normalized or not re.fullmatch(r"\d+", normalized):
+            return
+        canonical = str(int(normalized))
+        forms.add(canonical)
+        forms.add(canonical.zfill(2))
+        forms.add(canonical.zfill(3))
+
     compact_dash = re.sub(r"\s*-\s*", "-", base)
     forms.add(compact_dash)
     forms.add(compact_dash.replace("-", " - "))
@@ -102,6 +112,8 @@ def build_match_candidates(value: str):
         forms.update(parts)
         if len(parts) >= 2:
             forms.add(parts[-1])
+        for part in parts:
+            add_numeric_variants(part)
 
     door_match = re.search(r"DOOR\s*([A-Z0-9]+)", base)
     if door_match:
@@ -109,10 +121,18 @@ def build_match_candidates(value: str):
         forms.add(f"DOOR {number}")
         forms.add(f"DOOR{number}")
         forms.add(number)
+        if re.fullmatch(r"\d+", number):
+            canonical = str(int(number))
+            for variant in (canonical, canonical.zfill(2), canonical.zfill(3)):
+                forms.add(variant)
+                forms.add(f"DOOR {variant}")
+                forms.add(f"DOOR{variant}")
 
     tail_match = re.search(r"([A-Z0-9]+)$", base)
     if tail_match:
-        forms.add(tail_match.group(1))
+        tail = tail_match.group(1)
+        forms.add(tail)
+        add_numeric_variants(tail)
 
     expanded = set()
     for item in forms:
