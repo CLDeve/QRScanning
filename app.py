@@ -1053,6 +1053,8 @@ INDEX_TEMPLATE = """
     let pendingDetectedText = '';
     let lastSentText = '';
     let lastSentAt = 0;
+    const AUTO_STOP_IDLE_MS = 10000;
+    let autoStopTimer = null;
 
     function setResult(text, isError = false) {
       resultBox.textContent = text;
@@ -1061,6 +1063,26 @@ INDEX_TEMPLATE = """
 
     function setScanningState(isOn) {
       document.body.classList.toggle('scanning', isOn);
+    }
+
+    function clearAutoStopTimer() {
+      if (autoStopTimer) {
+        clearTimeout(autoStopTimer);
+        autoStopTimer = null;
+      }
+    }
+
+    function bumpAutoStopTimer() {
+      clearAutoStopTimer();
+      if (!scanning) {
+        return;
+      }
+      autoStopTimer = setTimeout(() => {
+        if (!scanning) {
+          return;
+        }
+        stopCameraScan('Auto-stopped after 10s inactivity. Tap Start to scan again.');
+      }, AUTO_STOP_IDLE_MS);
     }
 
     function setCaptureMode(showCapture) {
@@ -1173,6 +1195,7 @@ INDEX_TEMPLATE = """
         const qrText = await detectQrFromFrame();
         if (qrText) {
           setPendingDetection(qrText);
+          bumpAutoStopTimer();
         }
       } catch (_) {
         // keep loop alive
@@ -1231,11 +1254,13 @@ INDEX_TEMPLATE = """
       setCaptureMode(true);
       setPendingDetection('');
       setResult('Scan Door QR code');
+      bumpAutoStopTimer();
       scanLoop();
     }
 
-    function stopCameraScan() {
+    function stopCameraScan(stopMessage = 'Camera scan stopped') {
       scanning = false;
+      clearAutoStopTimer();
       setScanningState(false);
       setCaptureMode(false);
       setPendingDetection('');
@@ -1244,12 +1269,13 @@ INDEX_TEMPLATE = """
         stream = null;
       }
       video.srcObject = null;
-      setResult('Camera scan stopped');
+      setResult(stopMessage);
     }
 
     document.getElementById('start-scan').addEventListener('click', startCameraScan);
     document.getElementById('stop-scan').addEventListener('click', stopCameraScan);
     captureButton.addEventListener('click', async () => {
+      bumpAutoStopTimer();
       if (!pendingDetectedText) {
         setResult('No detected gate code yet.', true);
         return;
@@ -1258,9 +1284,11 @@ INDEX_TEMPLATE = """
       const ok = await submitScan(codeToSubmit, 'CAMERA');
       if (ok) {
         setPendingDetection('');
+        bumpAutoStopTimer();
       }
     });
     clearButton.addEventListener('click', () => {
+      bumpAutoStopTimer();
       setPendingDetection('');
       setResult('Ready to detect next gate code');
     });
