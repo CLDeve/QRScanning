@@ -25,12 +25,23 @@ def resolve_db_path() -> str:
 
 
 DB_PATH = resolve_db_path()
+DOOR_2_TIMEOUT_SECONDS = 20
 
 app = Flask(__name__)
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc_iso(value: str):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def format_iso_utc_to_sgt(value: str) -> str:
@@ -272,6 +283,10 @@ def init_db():
         action_event_columns = connection.execute("PRAGMA table_info(action_events)").fetchall()
         if not any(row["name"] == "closed_at_utc" for row in action_event_columns):
             connection.execute("ALTER TABLE action_events ADD COLUMN closed_at_utc TEXT")
+        if not any(row["name"] == "is_red_card" for row in action_event_columns):
+            connection.execute("ALTER TABLE action_events ADD COLUMN is_red_card INTEGER NOT NULL DEFAULT 0")
+        if not any(row["name"] == "door2_elapsed_seconds" for row in action_event_columns):
+            connection.execute("ALTER TABLE action_events ADD COLUMN door2_elapsed_seconds INTEGER")
         connection.commit()
 
 
@@ -423,12 +438,36 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
                 (gate_id, expected_door_no, scan_id),
             )
             if expected_index >= required_count:
+                is_red_card = 0
+                door2_elapsed_seconds = None
+                if required_count == 2:
+                    first_scan_row = connection.execute(
+                        """
+                        SELECT last_scan_id
+                        FROM gate_cycle_door_state
+                        WHERE gate_id = ? AND door_no = ?
+                        """,
+                        (gate_id, first_door_no),
+                    ).fetchone()
+                    if first_scan_row is not None:
+                        first_scan_at_row = connection.execute(
+                            "SELECT scanned_at_utc FROM scans WHERE id = ?",
+                            (int(first_scan_row["last_scan_id"]),),
+                        ).fetchone()
+                        first_dt = parse_utc_iso(first_scan_at_row["scanned_at_utc"]) if first_scan_at_row else None
+                        current_dt = parse_utc_iso(scanned_at_utc)
+                        if first_dt and current_dt:
+                            door2_elapsed_seconds = max(0, int((current_dt - first_dt).total_seconds()))
+                            if door2_elapsed_seconds > DOOR_2_TIMEOUT_SECONDS:
+                                is_red_card = 1
                 connection.execute(
                     """
-                    INSERT OR IGNORE INTO action_events(gate_id, completed_scan_id, completed_at_utc)
-                    VALUES(?, ?, ?)
+                    INSERT OR IGNORE INTO action_events(
+                        gate_id, completed_scan_id, completed_at_utc, is_red_card, door2_elapsed_seconds
+                    )
+                    VALUES(?, ?, ?, ?, ?)
                     """,
-                    (gate_id, scan_id, scanned_at_utc),
+                    (gate_id, scan_id, scanned_at_utc, is_red_card, door2_elapsed_seconds),
                 )
                 connection.execute(
                     """
@@ -640,6 +679,8 @@ def list_action_events(limit: int = 200, include_closed: bool = False):
                 e.completed_at_utc,
                 e.completed_scan_id,
                 e.closed_at_utc,
+                e.is_red_card,
+                e.door2_elapsed_seconds,
                 g.id AS gate_id,
                 g.gate_code
             FROM action_events e
@@ -675,6 +716,8 @@ def list_action_events(limit: int = 200, include_closed: bool = False):
                     "closed_at_utc": row["closed_at_utc"],
                     "closed_at_sgt": format_iso_utc_to_sgt(row["closed_at_utc"]),
                     "completed_scan_id": row["completed_scan_id"],
+                    "is_red_card": bool(row["is_red_card"]),
+                    "door2_elapsed_seconds": row["door2_elapsed_seconds"],
                 }
             )
         return events
@@ -1554,6 +1597,9 @@ ACTION_TEMPLATE = """
       --border: #dbe4ef;
       --ok: #166534;
       --ok-bg: #dcfce7;
+      --danger: #991b1b;
+      --danger-bg: #fee2e2;
+      --danger-border: #fecaca;
     }
     * { box-sizing: border-box; }
     body {
@@ -1614,6 +1660,15 @@ ACTION_TEMPLATE = """
       font-size: 12px;
       font-weight: 800;
       letter-spacing: 0.02em;
+    }
+    .badge.bad {
+      background: var(--danger-bg);
+      color: var(--danger);
+      border-color: #fca5a5;
+    }
+    .card.red {
+      background: #fff5f5;
+      border-color: var(--danger-border);
     }
     .gate {
       margin-top: 8px;
@@ -1723,11 +1778,24 @@ ACTION_TEMPLATE = """
         const doors = Array.isArray(event.doors) ? event.doors : [];
         const chips = doors.map((door) => `<span class="chip">${esc(door.door_number)}</span>`).join('');
         const card = document.createElement('div');
-        card.className = 'card';
+        const isRed = Boolean(event.is_red_card);
+        const isTwoDoor = Number(event.door_count || 0) === 2;
+        const elapsedRaw = event.door2_elapsed_seconds;
+        const hasElapsed = elapsedRaw !== null && elapsedRaw !== undefined && elapsedRaw !== '';
+        const elapsed = hasElapsed ? Number(elapsedRaw) : null;
+        const timingText = isTwoDoor
+          ? (elapsed === null
+            ? 'Door 2 timing unavailable'
+            : (isRed
+              ? `Door 2 scanned after ${elapsed}s (limit: 20s)`
+              : `Door 2 scanned in ${elapsed}s (limit: 20s)`))
+          : 'Sequence completed';
+        card.className = isRed ? 'card red' : 'card';
         card.innerHTML = `
-          <span class="badge">Completed</span>
+          <span class="badge ${isRed ? 'bad' : ''}">${isRed ? 'Timeout' : 'Completed'}</span>
           <div class="gate">${esc(event.gate_code)}</div>
           <div class="meta">${esc(event.door_count)} doors scanned</div>
+          <div class="meta">${esc(timingText)}</div>
           <div class="meta">${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</div>
           <div class="doors">${chips}</div>
           <div class="card-actions">
