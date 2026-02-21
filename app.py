@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, redirect, render_template_string, request
 
 
 def resolve_db_path() -> str:
@@ -2642,6 +2642,13 @@ def admin_logout():
     _, _, realm = get_auth_config(scope)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     reason = str(request.args.get("reason", "logout")).strip() or "logout"
+
+    # First request should challenge. After credentials are entered and valid,
+    # send user back to the protected page instead of keeping them on /admin/logout.
+    if request.authorization and is_admin_authorized(scope):
+        target = "/action" if scope == "action" else "/office/gates"
+        return redirect(f"{target}?reauth=1&reason={reason}&t={stamp}", code=302)
+
     response = Response(
         f"Logged out ({reason}). Close browser tab if login prompt persists.",
         401,
