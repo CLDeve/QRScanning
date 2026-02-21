@@ -1724,9 +1724,36 @@ ACTION_TEMPLATE = """
     .top {
       margin-bottom: 14px;
     }
+    .top-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
     h1 {
       margin: 0;
       font-size: 28px;
+    }
+    .mode-switch {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .mode-btn {
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      color: #0f172a;
+      border-radius: 999px;
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .mode-btn.active {
+      background: #0f172a;
+      color: #fff;
+      border-color: #0f172a;
     }
     .muted { color: var(--muted); font-size: 14px; }
     .status {
@@ -1773,6 +1800,11 @@ ACTION_TEMPLATE = """
       background: var(--danger-bg);
       color: var(--danger);
       border-color: #fca5a5;
+    }
+    .badge.closed {
+      background: #e2e8f0;
+      color: #334155;
+      border-color: #cbd5e1;
     }
     .card.red {
       background: #fff5f5;
@@ -1828,11 +1860,17 @@ ACTION_TEMPLATE = """
 <body>
   <div class="wrap">
     <div class="top">
-      <h1>Action Page</h1>
+      <div class="top-line">
+        <h1>Action Page</h1>
+        <div class="mode-switch">
+          <button id="mode-active" class="mode-btn active" type="button">Active</button>
+          <button id="mode-history" class="mode-btn" type="button">History</button>
+        </div>
+      </div>
       <div class="muted">Cards appear only when all door QR codes for a gate are scanned.</div>
       <div id="status" class="status">Refreshing...</div>
     </div>
-    <div id="empty" class="empty">No completed gate yet.</div>
+    <div id="empty" class="empty">No active gate yet.</div>
     <div id="cards" class="grid"></div>
   </div>
 
@@ -1840,6 +1878,9 @@ ACTION_TEMPLATE = """
     const statusBox = document.getElementById('status');
     const emptyBox = document.getElementById('empty');
     const cardsBox = document.getElementById('cards');
+    const activeModeButton = document.getElementById('mode-active');
+    const historyModeButton = document.getElementById('mode-history');
+    let showHistory = false;
 
     function esc(text) {
       return String(text || '')
@@ -1877,6 +1918,7 @@ ACTION_TEMPLATE = """
     function renderCards(events) {
       cardsBox.innerHTML = '';
       if (!events.length) {
+        emptyBox.textContent = showHistory ? 'No closed history yet.' : 'No active gate yet.';
         emptyBox.style.display = 'block';
         return;
       }
@@ -1898,17 +1940,26 @@ ACTION_TEMPLATE = """
               ? `Door 2 scanned after ${elapsed}s (limit: 20s)`
               : `Door 2 scanned in ${elapsed}s (limit: 20s)`))
           : 'Sequence completed';
+        const isClosed = Boolean(event.closed_at_utc);
+        const badgeClass = showHistory ? 'closed' : (isRed ? 'bad' : '');
+        const badgeText = showHistory ? 'Closed' : (isRed ? 'Timeout' : 'Completed');
+        const closedMeta = isClosed
+          ? `<div class="meta">Closed at ${esc(event.closed_at_sgt || event.closed_at_utc || '-')}</div>`
+          : '';
         card.className = isRed ? 'card red' : 'card';
         card.innerHTML = `
-          <span class="badge ${isRed ? 'bad' : ''}">${isRed ? 'Timeout' : 'Completed'}</span>
+          <span class="badge ${badgeClass}">${badgeText}</span>
           <div class="gate">${esc(event.gate_code)}</div>
           <div class="meta">${esc(event.door_count)} doors scanned</div>
           <div class="meta">${esc(timingText)}</div>
           <div class="meta">${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</div>
+          ${closedMeta}
           <div class="doors">${chips}</div>
+          ${showHistory ? '' : `
           <div class="card-actions">
             <button class="close-btn" data-action-id="${esc(event.id)}" type="button">Closed</button>
           </div>
+          `}
         `;
         cardsBox.appendChild(card);
       });
@@ -1938,7 +1989,8 @@ ACTION_TEMPLATE = """
 
     async function refreshActions() {
       try {
-        const res = await fetch('/api/actions?limit=80');
+        const query = showHistory ? '/api/actions?limit=120&include_closed=1' : '/api/actions?limit=80';
+        const res = await fetch(query);
         if (!res.ok) {
           statusBox.textContent = `Failed to refresh (${res.status})`;
           return;
@@ -1948,11 +2000,20 @@ ACTION_TEMPLATE = """
           statusBox.textContent = 'Unexpected API response';
           return;
         }
-        renderCards(events);
-        statusBox.textContent = `Updated at ${formatSgtDateTimeFromDate(new Date())}`;
+        const filtered = showHistory ? events.filter((event) => Boolean(event.closed_at_utc)) : events;
+        renderCards(filtered);
+        const modeLabel = showHistory ? 'History' : 'Active';
+        statusBox.textContent = `${modeLabel} updated at ${formatSgtDateTimeFromDate(new Date())}`;
       } catch (err) {
         statusBox.textContent = `Refresh error: ${err.message || err}`;
       }
+    }
+
+    function setMode(historyMode) {
+      showHistory = Boolean(historyMode);
+      activeModeButton.classList.toggle('active', !showHistory);
+      historyModeButton.classList.toggle('active', showHistory);
+      refreshActions();
     }
 
     cardsBox.addEventListener('click', async (event) => {
@@ -1967,6 +2028,8 @@ ACTION_TEMPLATE = """
       await closeEvent(actionId, button);
     });
 
+    activeModeButton.addEventListener('click', () => setMode(false));
+    historyModeButton.addEventListener('click', () => setMode(true));
     refreshActions();
     setInterval(refreshActions, 2000);
   </script>
