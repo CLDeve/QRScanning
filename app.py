@@ -2033,6 +2033,23 @@ GATE_SETUP_TEMPLATE = """
       color: #fff;
       border-color: #0f766e;
     }
+    .btn.warn {
+      background: #fff1f2;
+      color: #9f1239;
+      border-color: #fecdd3;
+    }
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .idle-note {
+      width: 100%;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: right;
+    }
     .grid {
       display: grid;
       grid-template-columns: 360px 1fr;
@@ -2152,7 +2169,11 @@ GATE_SETUP_TEMPLATE = """
         <h1>Gate Setup</h1>
         <div class="muted">Step 1: create a gate. Step 2: enter door numbers in required scan sequence (Door 1, then Door 2, etc.).</div>
       </div>
-      <a href="/office" class="btn">Back to Dashboard</a>
+      <div class="top-actions">
+        <a href="/office" class="btn">Back to Dashboard</a>
+        <button id="logout-btn" class="btn warn" type="button">Log Out</button>
+        <div class="idle-note">Auto logout after 3 minutes inactivity</div>
+      </div>
     </div>
 
     <div class="grid">
@@ -2223,7 +2244,10 @@ GATE_SETUP_TEMPLATE = """
     const gateSelect = document.getElementById('gate-select');
     const doorCountInput = document.getElementById('door-count');
     const doorFields = document.getElementById('door-fields');
+    const logoutButton = document.getElementById('logout-btn');
     let gateCache = [];
+    const AUTO_LOGOUT_IDLE_MS = 3 * 60 * 1000;
+    let idleLogoutTimer = null;
 
     function esc(text) {
       return String(text || '')
@@ -2251,6 +2275,25 @@ GATE_SETUP_TEMPLATE = """
     function ordinalWord(index) {
       const words = ['First', 'Second', 'Third', 'Fourth', 'Fifth', 'Sixth'];
       return words[index - 1] || `${index}th`;
+    }
+
+    function performLogout(reason = 'manual') {
+      const params = new URLSearchParams({ scope: 'admin', reason });
+      window.location.href = `/admin/logout?${params.toString()}`;
+    }
+
+    function clearIdleLogoutTimer() {
+      if (idleLogoutTimer) {
+        clearTimeout(idleLogoutTimer);
+        idleLogoutTimer = null;
+      }
+    }
+
+    function bumpIdleLogoutTimer() {
+      clearIdleLogoutTimer();
+      idleLogoutTimer = setTimeout(() => {
+        performLogout('idle_timeout');
+      }, AUTO_LOGOUT_IDLE_MS);
     }
 
     function getSelectedGate() {
@@ -2410,12 +2453,35 @@ GATE_SETUP_TEMPLATE = """
     gateCodeInput.addEventListener('input', () => {
       gateCodeInput.value = normalizeGateCode(gateCodeInput.value);
     });
+    logoutButton.addEventListener('click', () => performLogout('manual_button'));
+    ['click', 'keydown', 'mousemove', 'touchstart', 'scroll'].forEach((eventName) => {
+      window.addEventListener(eventName, bumpIdleLogoutTimer, { passive: true });
+    });
     buildDoorInputs();
     refreshGates();
+    bumpIdleLogoutTimer();
   </script>
 </body>
 </html>
 """
+
+
+@app.route("/admin/logout")
+def admin_logout():
+    scope = str(request.args.get("scope", "admin")).strip().lower()
+    if scope not in {"admin", "action"}:
+        scope = "admin"
+    _, _, realm = get_auth_config(scope)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    reason = str(request.args.get("reason", "logout")).strip() or "logout"
+    response = Response(
+        f"Logged out ({reason}). Close browser tab if login prompt persists.",
+        401,
+        {"WWW-Authenticate": f'Basic realm="{realm} Logout {stamp}"'},
+    )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.route("/")
