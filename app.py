@@ -2430,7 +2430,6 @@ def office():
 
 
 @app.route("/action")
-@require_admin_auth("action")
 def action_page():
     return render_template_string(ACTION_TEMPLATE)
 
@@ -2486,7 +2485,6 @@ def api_gate_summary():
 
 
 @app.route("/api/actions", methods=["GET"])
-@require_admin_auth("action")
 def api_actions():
     try:
         limit = int(request.args.get("limit", "200"))
@@ -2501,7 +2499,6 @@ def api_actions():
 
 
 @app.route("/api/actions/<int:event_id>/close", methods=["POST"])
-@require_admin_auth("action")
 def api_close_action(event_id: int):
     try:
         updated = close_action_event(event_id)
