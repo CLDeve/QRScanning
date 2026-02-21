@@ -47,35 +47,61 @@ def parse_utc_iso(value: str):
         return None
 
 
-def admin_auth_enabled() -> bool:
-    return bool(os.environ.get("ADMIN_USERNAME", "").strip() and os.environ.get("ADMIN_PASSWORD", "").strip())
+def get_auth_config(scope: str = "admin"):
+    if scope == "action":
+        action_user = os.environ.get("ACTION_ADMIN_USERNAME", "").strip()
+        action_pass = os.environ.get("ACTION_ADMIN_PASSWORD", "").strip()
+        if action_user and action_pass:
+            realm = os.environ.get("ACTION_ADMIN_AUTH_REALM", "Action Admin").strip() or "Action Admin"
+            return action_user, action_pass, realm
+    admin_user = os.environ.get("ADMIN_USERNAME", "").strip()
+    admin_pass = os.environ.get("ADMIN_PASSWORD", "").strip()
+    realm = os.environ.get("ADMIN_AUTH_REALM", ADMIN_AUTH_REALM).strip() or ADMIN_AUTH_REALM
+    return admin_user, admin_pass, realm
 
 
-def is_admin_authorized() -> bool:
+def admin_auth_enabled(scope: str = "admin") -> bool:
+    expected_user, expected_pass, _ = get_auth_config(scope)
+    return bool(expected_user and expected_pass)
+
+
+def is_admin_authorized(scope: str = "admin") -> bool:
     auth = request.authorization
     if auth is None:
         return False
-    expected_user = os.environ.get("ADMIN_USERNAME", "").strip()
-    expected_pass = os.environ.get("ADMIN_PASSWORD", "").strip()
+    expected_user, expected_pass, _ = get_auth_config(scope)
     provided_user = (auth.username or "").strip()
     provided_pass = auth.password or ""
     return hmac.compare_digest(provided_user, expected_user) and hmac.compare_digest(provided_pass, expected_pass)
 
 
-def require_admin_auth(view_fn):
+def _wrap_with_admin_auth(view_fn, scope: str):
     @wraps(view_fn)
     def wrapped(*args, **kwargs):
-        if not admin_auth_enabled():
+        if not admin_auth_enabled(scope):
             return view_fn(*args, **kwargs)
-        if not is_admin_authorized():
+        if not is_admin_authorized(scope):
+            _, _, realm = get_auth_config(scope)
             return Response(
                 "Authentication required",
                 401,
-                {"WWW-Authenticate": f'Basic realm="{ADMIN_AUTH_REALM}"'},
+                {"WWW-Authenticate": f'Basic realm="{realm}"'},
             )
         return view_fn(*args, **kwargs)
 
     return wrapped
+
+
+def require_admin_auth(scope_or_view_fn="admin"):
+    if callable(scope_or_view_fn):
+        return _wrap_with_admin_auth(scope_or_view_fn, "admin")
+
+    scope = str(scope_or_view_fn or "admin").strip().lower() or "admin"
+
+    def decorator(view_fn):
+        return _wrap_with_admin_auth(view_fn, scope)
+
+    return decorator
 
 
 def format_iso_utc_to_sgt(value: str) -> str:
@@ -2404,7 +2430,7 @@ def office():
 
 
 @app.route("/action")
-@require_admin_auth
+@require_admin_auth("action")
 def action_page():
     return render_template_string(ACTION_TEMPLATE)
 
@@ -2460,7 +2486,7 @@ def api_gate_summary():
 
 
 @app.route("/api/actions", methods=["GET"])
-@require_admin_auth
+@require_admin_auth("action")
 def api_actions():
     try:
         limit = int(request.args.get("limit", "200"))
@@ -2475,7 +2501,7 @@ def api_actions():
 
 
 @app.route("/api/actions/<int:event_id>/close", methods=["POST"])
-@require_admin_auth
+@require_admin_auth("action")
 def api_close_action(event_id: int):
     try:
         updated = close_action_event(event_id)

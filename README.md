@@ -80,3 +80,11 @@ Admin pages/APIs can be protected with HTTP Basic auth by setting:
 - `ADMIN_USERNAME`
 - `ADMIN_PASSWORD`
 - Optional: `ADMIN_AUTH_REALM` (default: `Gate Admin`)
+
+Use separate credentials for Action page/API only (optional):
+
+- `ACTION_ADMIN_USERNAME`
+- `ACTION_ADMIN_PASSWORD`
+- Optional: `ACTION_ADMIN_AUTH_REALM` (default: `Action Admin`)
+
+If action-specific credentials are not set, `/action` uses the main admin credentials.
