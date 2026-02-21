@@ -1755,6 +1755,24 @@ ACTION_TEMPLATE = """
       color: #fff;
       border-color: #0f172a;
     }
+    .history-tools {
+      display: none;
+      align-items: center;
+      gap: 8px;
+    }
+    .history-tools.show {
+      display: inline-flex;
+    }
+    .download-btn {
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      color: #0f172a;
+      border-radius: 999px;
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      text-decoration: none;
+    }
     .muted { color: var(--muted); font-size: 14px; }
     .status {
       margin-top: 8px;
@@ -1855,6 +1873,42 @@ ACTION_TEMPLATE = """
       opacity: 0.6;
       cursor: not-allowed;
     }
+    .history-table-wrap {
+      display: none;
+      margin-top: 8px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: auto;
+      background: #fff;
+    }
+    .history-table-wrap.show {
+      display: block;
+    }
+    .history-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 860px;
+      font-size: 13px;
+    }
+    .history-table th, .history-table td {
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+      padding: 8px 9px;
+      vertical-align: top;
+    }
+    .history-table th {
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      position: sticky;
+      top: 0;
+    }
+    .history-table .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 700;
+    }
   </style>
 </head>
 <body>
@@ -1865,6 +1919,9 @@ ACTION_TEMPLATE = """
         <div class="mode-switch">
           <button id="mode-active" class="mode-btn active" type="button">Active</button>
           <button id="mode-history" class="mode-btn" type="button">History</button>
+          <span id="history-tools" class="history-tools">
+            <a class="download-btn" href="/api/actions/history.xlsx">Download Excel</a>
+          </span>
         </div>
       </div>
       <div class="muted">Cards appear only when all door QR codes for a gate are scanned.</div>
@@ -1872,6 +1929,22 @@ ACTION_TEMPLATE = """
     </div>
     <div id="empty" class="empty">No active gate yet.</div>
     <div id="cards" class="grid"></div>
+    <div id="history-table-wrap" class="history-table-wrap">
+      <table class="history-table">
+        <thead>
+          <tr>
+            <th>Gate</th>
+            <th>Doors</th>
+            <th>Door Numbers</th>
+            <th>Completed (SGT)</th>
+            <th>Closed (SGT)</th>
+            <th>Status</th>
+            <th>Door 2 Time (s)</th>
+          </tr>
+        </thead>
+        <tbody id="history-rows"></tbody>
+      </table>
+    </div>
   </div>
 
   <script>
@@ -1880,6 +1953,9 @@ ACTION_TEMPLATE = """
     const cardsBox = document.getElementById('cards');
     const activeModeButton = document.getElementById('mode-active');
     const historyModeButton = document.getElementById('mode-history');
+    const historyTools = document.getElementById('history-tools');
+    const historyTableWrap = document.getElementById('history-table-wrap');
+    const historyRows = document.getElementById('history-rows');
     let showHistory = false;
 
     function esc(text) {
@@ -1918,7 +1994,7 @@ ACTION_TEMPLATE = """
     function renderCards(events) {
       cardsBox.innerHTML = '';
       if (!events.length) {
-        emptyBox.textContent = showHistory ? 'No closed history yet.' : 'No active gate yet.';
+        emptyBox.textContent = 'No active gate yet.';
         emptyBox.style.display = 'block';
         return;
       }
@@ -1940,12 +2016,8 @@ ACTION_TEMPLATE = """
               ? `Door 2 scanned after ${elapsed}s (limit: 20s)`
               : `Door 2 scanned in ${elapsed}s (limit: 20s)`))
           : 'Sequence completed';
-        const isClosed = Boolean(event.closed_at_utc);
-        const badgeClass = showHistory ? 'closed' : (isRed ? 'bad' : '');
-        const badgeText = showHistory ? 'Closed' : (isRed ? 'Timeout' : 'Completed');
-        const closedMeta = isClosed
-          ? `<div class="meta">Closed at ${esc(event.closed_at_sgt || event.closed_at_utc || '-')}</div>`
-          : '';
+        const badgeClass = isRed ? 'bad' : '';
+        const badgeText = isRed ? 'Timeout' : 'Completed';
         card.className = isRed ? 'card red' : 'card';
         card.innerHTML = `
           <span class="badge ${badgeClass}">${badgeText}</span>
@@ -1953,15 +2025,41 @@ ACTION_TEMPLATE = """
           <div class="meta">${esc(event.door_count)} doors scanned</div>
           <div class="meta">${esc(timingText)}</div>
           <div class="meta">${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</div>
-          ${closedMeta}
           <div class="doors">${chips}</div>
-          ${showHistory ? '' : `
           <div class="card-actions">
             <button class="close-btn" data-action-id="${esc(event.id)}" type="button">Closed</button>
           </div>
-          `}
         `;
         cardsBox.appendChild(card);
+      });
+    }
+
+    function renderHistoryTable(events) {
+      historyRows.innerHTML = '';
+      if (!events.length) {
+        emptyBox.textContent = 'No closed history yet.';
+        emptyBox.style.display = 'block';
+        return;
+      }
+      emptyBox.style.display = 'none';
+
+      events.forEach((event) => {
+        const doors = Array.isArray(event.doors) ? event.doors : [];
+        const doorNumbers = doors.map((door) => String(door.door_number || '').trim()).filter(Boolean).join(', ');
+        const isRed = Boolean(event.is_red_card);
+        const elapsedRaw = event.door2_elapsed_seconds;
+        const elapsed = elapsedRaw === null || elapsedRaw === undefined || elapsedRaw === '' ? '-' : Number(elapsedRaw);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="mono">${esc(event.gate_code)}</td>
+          <td>${esc(event.door_count)}</td>
+          <td>${esc(doorNumbers || '-')}</td>
+          <td>${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</td>
+          <td>${esc(event.closed_at_sgt || event.closed_at_utc || '-')}</td>
+          <td>${esc(isRed ? 'Timeout (Red)' : 'Completed')}</td>
+          <td>${esc(elapsed)}</td>
+        `;
+        historyRows.appendChild(tr);
       });
     }
 
@@ -2000,8 +2098,12 @@ ACTION_TEMPLATE = """
           statusBox.textContent = 'Unexpected API response';
           return;
         }
-        const filtered = showHistory ? events.filter((event) => Boolean(event.closed_at_utc)) : events;
-        renderCards(filtered);
+        if (showHistory) {
+          const filtered = events.filter((event) => Boolean(event.closed_at_utc));
+          renderHistoryTable(filtered);
+        } else {
+          renderCards(events);
+        }
         const modeLabel = showHistory ? 'History' : 'Active';
         statusBox.textContent = `${modeLabel} updated at ${formatSgtDateTimeFromDate(new Date())}`;
       } catch (err) {
@@ -2013,6 +2115,9 @@ ACTION_TEMPLATE = """
       showHistory = Boolean(historyMode);
       activeModeButton.classList.toggle('active', !showHistory);
       historyModeButton.classList.toggle('active', showHistory);
+      historyTools.classList.toggle('show', showHistory);
+      cardsBox.style.display = showHistory ? 'none' : 'grid';
+      historyTableWrap.classList.toggle('show', showHistory);
       refreshActions();
     }
 
@@ -2625,6 +2730,60 @@ def api_actions():
         return jsonify(list_action_events(limit=limit, include_closed=include_closed))
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/actions/history.xlsx", methods=["GET"])
+def api_actions_history_xlsx():
+    try:
+        events = [event for event in list_action_events(limit=200000, include_closed=True) if event.get("closed_at_utc")]
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+    try:
+        from openpyxl import Workbook
+    except ModuleNotFoundError:
+        return jsonify({"error": "excel export dependency not installed"}), 500
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Action History"
+    sheet.append(
+        [
+            "event_id",
+            "gate_code",
+            "door_count",
+            "door_numbers",
+            "completed_at_sgt",
+            "closed_at_sgt",
+            "status",
+            "door2_elapsed_seconds",
+        ]
+    )
+
+    for event in events:
+        doors = event.get("doors") or []
+        door_numbers = ", ".join(str((door or {}).get("door_number", "")).strip() for door in doors if door)
+        sheet.append(
+            [
+                event.get("id"),
+                event.get("gate_code"),
+                event.get("door_count"),
+                door_numbers,
+                event.get("completed_at_sgt") or event.get("completed_at_utc") or "",
+                event.get("closed_at_sgt") or event.get("closed_at_utc") or "",
+                "Timeout (Red)" if event.get("is_red_card") else "Completed",
+                event.get("door2_elapsed_seconds"),
+            ]
+        )
+
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=action_history.xlsx"},
+    )
 
 
 @app.route("/api/actions/<int:event_id>/close", methods=["POST"])
