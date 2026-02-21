@@ -2,11 +2,13 @@
 """Simple QR scanning web app."""
 
 import csv
+import hmac
 import io
 import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 
 from flask import Flask, Response, jsonify, render_template_string, request
 
@@ -26,6 +28,7 @@ def resolve_db_path() -> str:
 
 DB_PATH = resolve_db_path()
 DOOR_2_TIMEOUT_SECONDS = 20
+ADMIN_AUTH_REALM = os.environ.get("ADMIN_AUTH_REALM", "Gate Admin")
 
 app = Flask(__name__)
 
@@ -42,6 +45,37 @@ def parse_utc_iso(value: str):
         return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def admin_auth_enabled() -> bool:
+    return bool(os.environ.get("ADMIN_USERNAME", "").strip() and os.environ.get("ADMIN_PASSWORD", "").strip())
+
+
+def is_admin_authorized() -> bool:
+    auth = request.authorization
+    if auth is None:
+        return False
+    expected_user = os.environ.get("ADMIN_USERNAME", "").strip()
+    expected_pass = os.environ.get("ADMIN_PASSWORD", "").strip()
+    provided_user = (auth.username or "").strip()
+    provided_pass = auth.password or ""
+    return hmac.compare_digest(provided_user, expected_user) and hmac.compare_digest(provided_pass, expected_pass)
+
+
+def require_admin_auth(view_fn):
+    @wraps(view_fn)
+    def wrapped(*args, **kwargs):
+        if not admin_auth_enabled():
+            return view_fn(*args, **kwargs)
+        if not is_admin_authorized():
+            return Response(
+                "Authentication required",
+                401,
+                {"WWW-Authenticate": f'Basic realm="{ADMIN_AUTH_REALM}"'},
+            )
+        return view_fn(*args, **kwargs)
+
+    return wrapped
 
 
 def format_iso_utc_to_sgt(value: str) -> str:
@@ -2364,16 +2398,19 @@ def index():
 
 
 @app.route("/office")
+@require_admin_auth
 def office():
     return render_template_string(OFFICE_TEMPLATE)
 
 
 @app.route("/action")
+@require_admin_auth
 def action_page():
     return render_template_string(ACTION_TEMPLATE)
 
 
 @app.route("/office/gates")
+@require_admin_auth
 def office_gates():
     return render_template_string(GATE_SETUP_TEMPLATE)
 
@@ -2395,6 +2432,7 @@ def api_scan():
 
 
 @app.route("/api/scans", methods=["GET"])
+@require_admin_auth
 def api_scans():
     try:
         limit = int(request.args.get("limit", "300"))
@@ -2408,6 +2446,7 @@ def api_scans():
 
 
 @app.route("/api/gate-summary", methods=["GET"])
+@require_admin_auth
 def api_gate_summary():
     try:
         limit = int(request.args.get("limit", "300"))
@@ -2421,6 +2460,7 @@ def api_gate_summary():
 
 
 @app.route("/api/actions", methods=["GET"])
+@require_admin_auth
 def api_actions():
     try:
         limit = int(request.args.get("limit", "200"))
@@ -2435,6 +2475,7 @@ def api_actions():
 
 
 @app.route("/api/actions/<int:event_id>/close", methods=["POST"])
+@require_admin_auth
 def api_close_action(event_id: int):
     try:
         updated = close_action_event(event_id)
@@ -2447,6 +2488,7 @@ def api_close_action(event_id: int):
 
 
 @app.route("/api/gates", methods=["GET"])
+@require_admin_auth
 def api_gates():
     try:
         limit = int(request.args.get("limit", "300"))
@@ -2460,6 +2502,7 @@ def api_gates():
 
 
 @app.route("/api/gates", methods=["POST"])
+@require_admin_auth
 def api_create_gate():
     payload = request.get_json(silent=True) or {}
     gate_code = payload.get("gate_code", "")
@@ -2479,6 +2522,7 @@ def api_create_gate():
 
 
 @app.route("/api/gates/<int:gate_id>/doors", methods=["POST"])
+@require_admin_auth
 def api_set_gate_doors(gate_id: int):
     payload = request.get_json(silent=True) or {}
     door_numbers = payload.get("door_numbers", [])
@@ -2495,6 +2539,7 @@ def api_set_gate_doors(gate_id: int):
 
 
 @app.route("/api/export.csv")
+@require_admin_auth
 def api_export_csv():
     output = io.StringIO()
     writer = csv.writer(output)

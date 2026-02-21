@@ -42,7 +42,7 @@ This repo includes `render.yaml` and is ready for Render deploy.
 Render will use:
 
 - Build: `pip install -r requirements.txt`
-- Start: `python app.py`
+- Start: `gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 120`
 - DB path: `/tmp/qr_scans.db`
 
 After deploy, Render gives an HTTPS URL like:
@@ -63,3 +63,20 @@ Use that URL on your phone.
 - SQLite file: local `qr_scans.db`, Render `/tmp/qr_scans.db` (via `DB_PATH`).
 
 Note: On free cloud hosting, SQLite may reset when the service restarts.
+
+For persistent data on Render, attach a persistent disk and set:
+
+- `DB_PATH=/var/data/qr_scans.db`
+
+## Admin Access Control
+
+Scanner endpoints stay open:
+
+- `/`
+- `/api/scan`
+
+Admin pages/APIs can be protected with HTTP Basic auth by setting:
+
+- `ADMIN_USERNAME`
+- `ADMIN_PASSWORD`
+- Optional: `ADMIN_AUTH_REALM` (default: `Gate Admin`)
