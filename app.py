@@ -7,6 +7,7 @@ import io
 import os
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.parse import urlencode
@@ -40,6 +41,8 @@ app.config["SECRET_KEY"] = (
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("RENDER", "").strip().lower() == "true"
+_DB_INIT_LOCK = threading.Lock()
+_DB_INIT_DONE = False
 
 
 def utc_now_iso() -> str:
@@ -287,7 +290,20 @@ def build_gate_hints(scanned_qr: str):
     return sorted(hints)
 
 
-def db_connect():
+def ensure_db_initialized():
+    global _DB_INIT_DONE
+    if _DB_INIT_DONE:
+        return
+    with _DB_INIT_LOCK:
+        if _DB_INIT_DONE:
+            return
+        init_db()
+        _DB_INIT_DONE = True
+
+
+def db_connect(skip_init: bool = False):
+    if not skip_init:
+        ensure_db_initialized()
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -300,7 +316,7 @@ def init_db():
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 
-    with db_connect() as connection:
+    with db_connect(skip_init=True) as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS scans (
@@ -3073,9 +3089,6 @@ def main():
     except ValueError:
         port = 5053
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
-
-init_db()
 
 
 if __name__ == "__main__":
