@@ -1211,7 +1211,7 @@ INDEX_TEMPLATE = """
       <div class="control-row">
         <button id="start-scan" class="primary" type="button">Start</button>
         <button id="capture-scan" class="capture hidden" type="button" disabled>Capture</button>
-        <button id="stop-scan" class="ghost" type="button">Stop</button>
+        <button id="stop-scan" class="ghost hidden" type="button">Stop</button>
       </div>
       <div class="capture-row">
         <button id="clear-detected" class="ghost hidden" type="button">Reset</button>
@@ -1228,6 +1228,7 @@ INDEX_TEMPLATE = """
     const resultBox = document.getElementById('scan-result');
     const startButton = document.getElementById('start-scan');
     const captureButton = document.getElementById('capture-scan');
+    const stopButton = document.getElementById('stop-scan');
     const clearButton = document.getElementById('clear-detected');
     const detectedChip = document.getElementById('detected-chip');
     let stream = null;
@@ -1247,6 +1248,7 @@ INDEX_TEMPLATE = """
 
     function setScanningState(isOn) {
       document.body.classList.toggle('scanning', isOn);
+      stopButton.classList.toggle('hidden', !isOn);
     }
 
     function clearAutoStopTimer() {
