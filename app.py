@@ -427,6 +427,10 @@ def init_db():
             connection.execute("ALTER TABLE action_events ADD COLUMN is_red_card INTEGER NOT NULL DEFAULT 0")
         if not any(row["name"] == "door2_elapsed_seconds" for row in action_event_columns):
             connection.execute("ALTER TABLE action_events ADD COLUMN door2_elapsed_seconds INTEGER")
+        if not any(row["name"] == "event_type" for row in action_event_columns):
+            connection.execute("ALTER TABLE action_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'completed'")
+        if not any(row["name"] == "event_note" for row in action_event_columns):
+            connection.execute("ALTER TABLE action_events ADD COLUMN event_note TEXT")
         connection.commit()
 
 
@@ -603,9 +607,9 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO action_events(
-                        gate_id, completed_scan_id, completed_at_utc, is_red_card, door2_elapsed_seconds
+                        gate_id, completed_scan_id, completed_at_utc, is_red_card, door2_elapsed_seconds, event_type
                     )
-                    VALUES(?, ?, ?, ?, ?)
+                    VALUES(?, ?, ?, ?, ?, 'completed')
                     """,
                     (gate_id, scan_id, scanned_at_utc, is_red_card, door2_elapsed_seconds),
                 )
@@ -630,6 +634,20 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
             continue
 
         # Wrong order: reset sequence progress for this gate.
+        wrong_scanned_door_no = next(iter(sorted(matched_door_nos)), None)
+        event_note = f"Wrong sequence: expected Door {expected_door_no}"
+        if wrong_scanned_door_no is not None:
+            event_note += f", scanned Door {wrong_scanned_door_no}"
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO action_events(
+                gate_id, completed_scan_id, completed_at_utc, closed_at_utc,
+                is_red_card, door2_elapsed_seconds, event_type, event_note
+            )
+            VALUES(?, ?, ?, ?, 0, NULL, 'wrong_sequence', ?)
+            """,
+            (gate_id, scan_id, scanned_at_utc, scanned_at_utc, event_note),
+        )
         connection.execute("DELETE FROM gate_cycle_door_state WHERE gate_id = ?", (gate_id,))
 
         if first_door_no in matched_door_nos:
@@ -821,6 +839,8 @@ def list_action_events(limit: int = 200, include_closed: bool = False):
                 e.closed_at_utc,
                 e.is_red_card,
                 e.door2_elapsed_seconds,
+                e.event_type,
+                e.event_note,
                 g.id AS gate_id,
                 g.gate_code
             FROM action_events e
@@ -858,6 +878,8 @@ def list_action_events(limit: int = 200, include_closed: bool = False):
                     "completed_scan_id": row["completed_scan_id"],
                     "is_red_card": bool(row["is_red_card"]),
                     "door2_elapsed_seconds": row["door2_elapsed_seconds"],
+                    "event_type": (row["event_type"] or "completed"),
+                    "event_note": row["event_note"],
                 }
             )
         return events
@@ -1999,6 +2021,7 @@ ACTION_TEMPLATE = """
             <th>Completed (SGT)</th>
             <th>Closed (SGT)</th>
             <th>Status</th>
+            <th>Remark</th>
             <th>Door 2 Time (s)</th>
           </tr>
         </thead>
@@ -2107,8 +2130,16 @@ ACTION_TEMPLATE = """
         const doors = Array.isArray(event.doors) ? event.doors : [];
         const doorNumbers = doors.map((door) => String(door.door_number || '').trim()).filter(Boolean).join(', ');
         const isRed = Boolean(event.is_red_card);
+        const eventType = String(event.event_type || 'completed');
+        const eventNote = String(event.event_note || '').trim();
         const elapsedRaw = event.door2_elapsed_seconds;
         const elapsed = elapsedRaw === null || elapsedRaw === undefined || elapsedRaw === '' ? '-' : Number(elapsedRaw);
+        let statusText = 'Completed';
+        if (eventType === 'wrong_sequence') {
+          statusText = 'Wrong Sequence';
+        } else if (isRed) {
+          statusText = 'Timeout (Red)';
+        }
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td class="mono">${esc(event.gate_code)}</td>
@@ -2116,7 +2147,8 @@ ACTION_TEMPLATE = """
           <td>${esc(doorNumbers || '-')}</td>
           <td>${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</td>
           <td>${esc(event.closed_at_sgt || event.closed_at_utc || '-')}</td>
-          <td>${esc(isRed ? 'Timeout (Red)' : 'Completed')}</td>
+          <td>${esc(statusText)}</td>
+          <td>${esc(eventNote || '-')}</td>
           <td>${esc(elapsed)}</td>
         `;
         historyRows.appendChild(tr);
@@ -2256,10 +2288,19 @@ GATE_SETUP_TEMPLATE = """
       font-weight: 700;
       cursor: pointer;
     }
+    .btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.65;
+    }
     .btn.primary {
       background: var(--accent);
       color: #fff;
       border-color: #0f766e;
+    }
+    .btn.primary:disabled {
+      background: #94a3b8;
+      border-color: #94a3b8;
+      color: #e2e8f0;
     }
     .btn.warn {
       background: #fff1f2;
@@ -2413,7 +2454,7 @@ GATE_SETUP_TEMPLATE = """
             <label for="gate-code">Gate Code</label>
             <input id="gate-code" placeholder="e.g. G12" required>
           </div>
-          <button class="btn primary" type="submit">Create Gate</button>
+          <button id="create-gate-btn" class="btn primary" type="submit" disabled>Create Gate</button>
         </form>
 
         <hr style="border:0;border-top:1px solid var(--border);margin:14px 0;">
@@ -2469,6 +2510,7 @@ GATE_SETUP_TEMPLATE = """
     const createGateForm = document.getElementById('create-gate-form');
     const setDoorsForm = document.getElementById('set-doors-form');
     const gateCodeInput = document.getElementById('gate-code');
+    const createGateButton = document.getElementById('create-gate-btn');
     const gateSelect = document.getElementById('gate-select');
     const doorCountInput = document.getElementById('door-count');
     const doorFields = document.getElementById('door-fields');
@@ -2498,6 +2540,10 @@ GATE_SETUP_TEMPLATE = """
 
     function normalizeGateCode(value) {
       return String(value || '').trim().toUpperCase();
+    }
+
+    function syncCreateGateButtonState() {
+      createGateButton.disabled = !Boolean(normalizeGateCode(gateCodeInput.value));
     }
 
     function ordinalWord(index) {
@@ -2629,6 +2675,7 @@ GATE_SETUP_TEMPLATE = """
       const gateCode = normalizeGateCode(gateCodeInput.value);
       if (!gateCode) {
         setCreateStatus('Gate code is required', true);
+        syncCreateGateButtonState();
         return;
       }
 
@@ -2644,6 +2691,7 @@ GATE_SETUP_TEMPLATE = """
       }
 
       gateCodeInput.value = '';
+      syncCreateGateButtonState();
       setCreateStatus(`Created gate ${data.gate_code}`);
       await refreshGates();
       gateSelect.value = String(data.id);
@@ -2680,12 +2728,14 @@ GATE_SETUP_TEMPLATE = """
     doorCountInput.addEventListener('change', () => buildDoorInputs());
     gateCodeInput.addEventListener('input', () => {
       gateCodeInput.value = normalizeGateCode(gateCodeInput.value);
+      syncCreateGateButtonState();
     });
     logoutButton.addEventListener('click', () => performLogout('manual_button'));
     ['click', 'keydown', 'mousemove', 'touchstart', 'scroll'].forEach((eventName) => {
       window.addEventListener(eventName, bumpIdleLogoutTimer, { passive: true });
     });
     buildDoorInputs();
+    syncCreateGateButtonState();
     refreshGates();
     bumpIdleLogoutTimer();
   </script>
@@ -2969,6 +3019,7 @@ def api_actions_history_xlsx():
             "completed_at_sgt",
             "closed_at_sgt",
             "status",
+            "remark",
             "door2_elapsed_seconds",
         ]
     )
@@ -2984,7 +3035,12 @@ def api_actions_history_xlsx():
                 door_numbers,
                 event.get("completed_at_sgt") or event.get("completed_at_utc") or "",
                 event.get("closed_at_sgt") or event.get("closed_at_utc") or "",
-                "Timeout (Red)" if event.get("is_red_card") else "Completed",
+                (
+                    "Wrong Sequence"
+                    if str(event.get("event_type") or "completed") == "wrong_sequence"
+                    else ("Timeout (Red)" if event.get("is_red_card") else "Completed")
+                ),
+                event.get("event_note") or "",
                 event.get("door2_elapsed_seconds"),
             ]
         )
