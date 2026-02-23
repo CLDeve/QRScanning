@@ -504,32 +504,32 @@ def list_gate_summary(limit: int = 300):
 def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_at_utc: str):
     candidates = build_match_candidates(scanned_qr)
     if not candidates:
-        return
+        candidates = []
 
     gate_hints = build_gate_hints(scanned_qr)
-    door_placeholders = ", ".join("?" for _ in candidates)
-    query_params = list(candidates)
+    matches = []
+    if candidates:
+        door_placeholders = ", ".join("?" for _ in candidates)
+        query_params = list(candidates)
 
-    if gate_hints:
-        gate_placeholders = ", ".join("?" for _ in gate_hints)
-        query = f"""
-        SELECT d.gate_id, d.door_no
-        FROM gate_config_doors d
-        JOIN gate_configs g ON g.id = d.gate_id
-        WHERE UPPER(d.door_number) IN ({door_placeholders})
-          AND UPPER(g.gate_code) IN ({gate_placeholders})
-        """
-        query_params.extend(gate_hints)
-    else:
-        query = f"""
-        SELECT gate_id, door_no
-        FROM gate_config_doors
-        WHERE UPPER(door_number) IN ({door_placeholders})
-        """
+        if gate_hints:
+            gate_placeholders = ", ".join("?" for _ in gate_hints)
+            query = f"""
+            SELECT d.gate_id, d.door_no
+            FROM gate_config_doors d
+            JOIN gate_configs g ON g.id = d.gate_id
+            WHERE UPPER(d.door_number) IN ({door_placeholders})
+              AND UPPER(g.gate_code) IN ({gate_placeholders})
+            """
+            query_params.extend(gate_hints)
+        else:
+            query = f"""
+            SELECT gate_id, door_no
+            FROM gate_config_doors
+            WHERE UPPER(door_number) IN ({door_placeholders})
+            """
 
-    matches = connection.execute(query, query_params).fetchall()
-    if not matches:
-        return
+        matches = connection.execute(query, query_params).fetchall()
 
     matches_by_gate = {}
     for row in matches:
@@ -712,6 +712,60 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
                 """,
                 (scanned_at_utc, gate_id),
             )
+
+    # If a sequence is in progress for another gate and this scan does not belong to it,
+    # record it as a wrong-sequence history item with a clearer remark.
+    in_progress_rows = connection.execute(
+        """
+        SELECT gate_id, next_expected_door_no
+        FROM gate_cycle_state
+        WHERE next_expected_door_no > 1
+        """
+    ).fetchall()
+    matched_gate_ids = set(matches_by_gate.keys())
+    scanned_label = normalize_match_value(scanned_qr) or str(scanned_qr or "").strip() or "UNKNOWN"
+    for state_row in in_progress_rows:
+        gate_id = int(state_row["gate_id"])
+        if gate_id in matched_gate_ids:
+            continue
+        required_doors = connection.execute(
+            """
+            SELECT door_no
+            FROM gate_config_doors
+            WHERE gate_id = ?
+            ORDER BY door_no ASC
+            """,
+            (gate_id,),
+        ).fetchall()
+        if not required_doors:
+            continue
+        required_count = len(required_doors)
+        expected_index = int(state_row["next_expected_door_no"] or 1)
+        if expected_index < 1 or expected_index > required_count:
+            expected_index = 1
+        if expected_index <= 1:
+            continue
+        expected_door_no = int(required_doors[expected_index - 1]["door_no"])
+        event_note = f"Wrong sequence: expected Door {expected_door_no}, scanned {scanned_label} (not in gate)"
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO action_events(
+                gate_id, completed_scan_id, completed_at_utc, closed_at_utc,
+                is_red_card, door2_elapsed_seconds, event_type, event_note
+            )
+            VALUES(?, ?, ?, ?, 0, NULL, 'wrong_sequence', ?)
+            """,
+            (gate_id, scan_id, scanned_at_utc, scanned_at_utc, event_note),
+        )
+        connection.execute("DELETE FROM gate_cycle_door_state WHERE gate_id = ?", (gate_id,))
+        connection.execute(
+            """
+            UPDATE gate_cycle_state
+            SET updated_at_utc = ?, next_expected_door_no = 1
+            WHERE gate_id = ?
+            """,
+            (scanned_at_utc, gate_id),
+        )
 
 
 def normalize_gate_code(gate_code: str) -> str:
