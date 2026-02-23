@@ -861,6 +861,24 @@ def create_gate(gate_code: str):
         return fetch_gate_config_with_doors(connection, cursor.lastrowid)
 
 
+def update_gate(gate_id: int, gate_code: str):
+    code = normalize_gate_code(gate_code)
+    with db_connect() as connection:
+        existing = fetch_gate_config_with_doors(connection, gate_id)
+        if existing is None:
+            raise ValueError("gate not found")
+        connection.execute(
+            """
+            UPDATE gate_configs
+            SET gate_code = ?
+            WHERE id = ?
+            """,
+            (code, gate_id),
+        )
+        connection.commit()
+        return fetch_gate_config_with_doors(connection, gate_id)
+
+
 def set_gate_doors(gate_id: int, door_numbers):
     count, normalized = validate_door_numbers(door_numbers)
     now = utc_now_iso()
@@ -2411,6 +2429,15 @@ GATE_SETUP_TEMPLATE = """
       color: #9f1239;
       border-color: #fecdd3;
     }
+    .btn.subtle {
+      background: #f8fafc;
+      color: #0f172a;
+      border-color: #cbd5e1;
+    }
+    .btn.sm {
+      padding: 6px 10px;
+      font-size: 12px;
+    }
     .top-actions {
       display: flex;
       align-items: center;
@@ -2516,6 +2543,11 @@ GATE_SETUP_TEMPLATE = """
       flex-wrap: wrap;
       gap: 6px;
     }
+    .row-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
     .chip {
       border: 1px solid #bfdbfe;
       background: #eff6ff;
@@ -2553,12 +2585,16 @@ GATE_SETUP_TEMPLATE = """
       <div class="card">
         <h2>Create Gate</h2>
         <div id="create-status" class="status">Ready</div>
+        <div id="edit-gate-note" class="status" style="display:none;"></div>
         <form id="create-gate-form">
           <div class="field">
             <label for="gate-code">Gate Code</label>
             <input id="gate-code" placeholder="e.g. G12" required>
           </div>
-          <button id="create-gate-btn" class="btn primary" type="submit" disabled>Create Gate</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button id="create-gate-btn" class="btn primary" type="submit" disabled>Create Gate</button>
+            <button id="cancel-edit-gate-btn" class="btn subtle" type="button" style="display:none;">Cancel Edit</button>
+          </div>
         </form>
 
         <hr style="border:0;border-top:1px solid var(--border);margin:14px 0;">
@@ -2599,6 +2635,7 @@ GATE_SETUP_TEMPLATE = """
               <th>Doors</th>
               <th>Door Numbers</th>
               <th>Created At (SGT)</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="gate-rows"></tbody>
@@ -2615,11 +2652,14 @@ GATE_SETUP_TEMPLATE = """
     const setDoorsForm = document.getElementById('set-doors-form');
     const gateCodeInput = document.getElementById('gate-code');
     const createGateButton = document.getElementById('create-gate-btn');
+    const cancelEditGateButton = document.getElementById('cancel-edit-gate-btn');
+    const editGateNoteBox = document.getElementById('edit-gate-note');
     const gateSelect = document.getElementById('gate-select');
     const doorCountInput = document.getElementById('door-count');
     const doorFields = document.getElementById('door-fields');
     const logoutButton = document.getElementById('logout-btn');
     let gateCache = [];
+    let editingGateId = null;
     const AUTO_LOGOUT_IDLE_MS = 3 * 60 * 1000;
     let idleLogoutTimer = null;
 
@@ -2648,6 +2688,29 @@ GATE_SETUP_TEMPLATE = """
 
     function syncCreateGateButtonState() {
       createGateButton.disabled = !Boolean(normalizeGateCode(gateCodeInput.value));
+    }
+
+    function setGateEditMode(gate) {
+      if (!gate) {
+        editingGateId = null;
+        editGateNoteBox.style.display = 'none';
+        editGateNoteBox.textContent = '';
+        gateCodeInput.value = '';
+        createGateButton.textContent = 'Create Gate';
+        cancelEditGateButton.style.display = 'none';
+        syncCreateGateButtonState();
+        return;
+      }
+      editingGateId = Number(gate.id);
+      gateCodeInput.value = normalizeGateCode(gate.gate_code);
+      createGateButton.textContent = 'Update Gate';
+      cancelEditGateButton.style.display = 'inline-block';
+      editGateNoteBox.style.display = 'block';
+      editGateNoteBox.className = 'status';
+      editGateNoteBox.textContent = `Editing gate ${gate.gate_code}`;
+      gateSelect.value = String(gate.id);
+      syncDoorEditorFromSelectedGate();
+      syncCreateGateButtonState();
     }
 
     function ordinalWord(index) {
@@ -2720,6 +2783,11 @@ GATE_SETUP_TEMPLATE = """
           <td>${esc(gate.door_count)}</td>
           <td><div class="chips">${chips}</div></td>
           <td>${esc(gate.created_at_sgt || gate.created_at_utc || '-')}</td>
+          <td>
+            <div class="row-actions">
+              <button class="btn sm subtle edit-gate-btn" type="button" data-gate-id="${esc(gate.id)}">Edit</button>
+            </div>
+          </td>
         `;
         gateRows.appendChild(tr);
       });
@@ -2783,23 +2851,26 @@ GATE_SETUP_TEMPLATE = """
         return;
       }
 
-      const res = await fetch('/api/gates', {
-        method: 'POST',
+      const isEditing = Number.isInteger(editingGateId) && editingGateId > 0;
+      const targetUrl = isEditing ? `/api/gates/${editingGateId}` : '/api/gates';
+      const method = isEditing ? 'PUT' : 'POST';
+      const res = await fetch(targetUrl, {
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ gate_code: gateCode }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setCreateStatus(data.error || `Create gate failed (${res.status})`, true);
+        setCreateStatus(data.error || `${isEditing ? 'Update' : 'Create'} gate failed (${res.status})`, true);
         return;
       }
 
-      gateCodeInput.value = '';
       syncCreateGateButtonState();
-      setCreateStatus(`Created gate ${data.gate_code}`);
+      setCreateStatus(`${isEditing ? 'Updated' : 'Created'} gate ${data.gate_code}`);
       await refreshGates();
       gateSelect.value = String(data.id);
       syncDoorEditorFromSelectedGate();
+      setGateEditMode(null);
     });
 
     setDoorsForm.addEventListener('submit', async (event) => {
@@ -2829,17 +2900,40 @@ GATE_SETUP_TEMPLATE = """
     });
 
     gateSelect.addEventListener('change', syncDoorEditorFromSelectedGate);
+    gateRows.addEventListener('click', (event) => {
+      const btn = event.target.closest('.edit-gate-btn');
+      if (!btn) {
+        return;
+      }
+      const gateId = Number(btn.dataset.gateId);
+      if (!gateId) {
+        return;
+      }
+      const gate = gateCache.find((item) => Number(item.id) === gateId);
+      if (!gate) {
+        setDoorsStatus('Selected gate not found', true);
+        return;
+      }
+      setGateEditMode(gate);
+      setDoorsStatus(`Editing doors for ${gate.gate_code}`);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
     doorCountInput.addEventListener('change', () => buildDoorInputs());
     gateCodeInput.addEventListener('input', () => {
       gateCodeInput.value = normalizeGateCode(gateCodeInput.value);
       syncCreateGateButtonState();
     });
     logoutButton.addEventListener('click', () => performLogout('manual_button'));
+    cancelEditGateButton.addEventListener('click', () => {
+      setGateEditMode(null);
+      setCreateStatus('Ready');
+    });
     ['click', 'keydown', 'mousemove', 'touchstart', 'scroll'].forEach((eventName) => {
       window.addEventListener(eventName, bumpIdleLogoutTimer, { passive: true });
     });
     buildDoorInputs();
     syncCreateGateButtonState();
+    setGateEditMode(null);
     refreshGates();
     bumpIdleLogoutTimer();
   </script>
@@ -3198,6 +3292,26 @@ def api_create_gate():
     try:
         gate = create_gate(gate_code)
         return jsonify(gate), 201
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except sqlite3.IntegrityError as exc:
+        msg = str(exc).lower()
+        if "gate_configs.gate_code" in msg:
+            return jsonify({"error": "gate_code already exists"}), 409
+        return jsonify({"error": "integrity constraint failed"}), 409
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/gates/<int:gate_id>", methods=["PUT", "PATCH"])
+@require_admin_auth
+def api_update_gate(gate_id: int):
+    payload = request.get_json(silent=True) or {}
+    gate_code = payload.get("gate_code", "")
+
+    try:
+        gate = update_gate(gate_id, gate_code)
+        return jsonify(gate)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except sqlite3.IntegrityError as exc:
