@@ -1455,11 +1455,13 @@ INDEX_TEMPLATE = """
         stream = null;
       }
       video.srcObject = null;
-      setResult(stopMessage);
+      if (typeof stopMessage === 'string' && stopMessage.trim()) {
+        setResult(stopMessage);
+      }
     }
 
     document.getElementById('start-scan').addEventListener('click', startCameraScan);
-    document.getElementById('stop-scan').addEventListener('click', stopCameraScan);
+    document.getElementById('stop-scan').addEventListener('click', () => stopCameraScan(''));
     captureButton.addEventListener('click', async () => {
       bumpAutoStopTimer();
       if (!pendingDetectedText) {
