@@ -354,11 +354,42 @@ def init_db():
             """
             CREATE TABLE IF NOT EXISTS gate_configs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                gate_code TEXT NOT NULL UNIQUE,
+                gate_code TEXT NOT NULL,
                 created_at_utc TEXT NOT NULL
             )
             """
         )
+        gate_configs_sql_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'gate_configs'"
+        ).fetchone()
+        gate_configs_sql = (((gate_configs_sql_row["sql"] if gate_configs_sql_row else "") or "").upper().replace("\n", " "))
+        if "GATE_CODE TEXT NOT NULL UNIQUE" in gate_configs_sql:
+            connection.commit()
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("DROP TABLE IF EXISTS gate_configs_new")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS gate_configs_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    gate_code TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO gate_configs_new(id, gate_code, created_at_utc)
+                SELECT id, gate_code, created_at_utc
+                FROM gate_configs
+                ORDER BY id ASC
+                """
+            )
+            connection.execute("DROP TABLE gate_configs")
+            connection.execute("ALTER TABLE gate_configs_new RENAME TO gate_configs")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_gate_configs_gate_code ON gate_configs(gate_code)"
+            )
+            connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS gate_config_doors (
@@ -861,12 +892,38 @@ def create_gate(gate_code: str):
         return fetch_gate_config_with_doors(connection, cursor.lastrowid)
 
 
+def _has_duplicate_gate_sequence(connection, gate_id: int, gate_code: str, door_numbers_normalized):
+    target = [normalize_match_value(value) for value in (door_numbers_normalized or [])]
+    if not target:
+        return False
+    rows = connection.execute(
+        """
+        SELECT id
+        FROM gate_configs
+        WHERE UPPER(gate_code) = UPPER(?)
+          AND id <> ?
+        """,
+        (gate_code, gate_id),
+    ).fetchall()
+    for row in rows:
+        other_gate = fetch_gate_config_with_doors(connection, int(row["id"]))
+        if not other_gate:
+            continue
+        other_doors = [normalize_match_value((door or {}).get("door_number", "")) for door in (other_gate.get("doors") or [])]
+        if other_doors == target:
+            return True
+    return False
+
+
 def update_gate(gate_id: int, gate_code: str):
     code = normalize_gate_code(gate_code)
     with db_connect() as connection:
         existing = fetch_gate_config_with_doors(connection, gate_id)
         if existing is None:
             raise ValueError("gate not found")
+        existing_doors = [normalize_match_value((door or {}).get("door_number", "")) for door in (existing.get("doors") or [])]
+        if existing_doors and _has_duplicate_gate_sequence(connection, gate_id, code, existing_doors):
+            raise ValueError("same gate code with identical door sequence already exists")
         connection.execute(
             """
             UPDATE gate_configs
@@ -887,6 +944,8 @@ def set_gate_doors(gate_id: int, door_numbers):
         existing = fetch_gate_config_with_doors(connection, gate_id)
         if existing is None:
             raise ValueError("gate not found")
+        if _has_duplicate_gate_sequence(connection, gate_id, existing["gate_code"], normalized):
+            raise ValueError("same gate code with identical door sequence already exists")
 
         connection.execute("DELETE FROM gate_config_doors WHERE gate_id = ?", (gate_id,))
         connection.execute("DELETE FROM gate_cycle_door_state WHERE gate_id = ?", (gate_id,))
@@ -2650,6 +2709,7 @@ GATE_SETUP_TEMPLATE = """
         <table>
           <thead>
             <tr>
+              <th>ID</th>
               <th>Gate</th>
               <th>Doors</th>
               <th>Door Numbers</th>
@@ -2798,6 +2858,7 @@ GATE_SETUP_TEMPLATE = """
         const chips = doors.map((door) => `<span class="chip">#${esc(door.door_no)} ${esc(door.door_number)}</span>`).join('');
         const tr = document.createElement('tr');
         tr.innerHTML = `
+          <td class="mono">#${esc(gate.id)}</td>
           <td class="mono">${esc(gate.gate_code)}</td>
           <td>${esc(gate.door_count)}</td>
           <td><div class="chips">${chips}</div></td>
@@ -2818,7 +2879,7 @@ GATE_SETUP_TEMPLATE = """
       gates.forEach((gate) => {
         const option = document.createElement('option');
         option.value = String(gate.id);
-        option.textContent = gate.gate_code;
+        option.textContent = `${gate.gate_code} (ID ${gate.id})`;
         gateSelect.appendChild(option);
       });
 
