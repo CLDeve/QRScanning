@@ -2116,6 +2116,11 @@ ACTION_TEMPLATE = """
     <div class="top">
       <div class="top-line">
         <h1>{{ page_heading or 'Action Page' }}</h1>
+        {% if not history_only %}
+        <div class="mode-switch">
+          <a class="download-btn" href="/action/history">History</a>
+        </div>
+        {% endif %}
         {% if history_only %}
         <div class="mode-switch">
           <a class="download-btn" href="/action">Back to Action</a>
@@ -3144,7 +3149,6 @@ def action_page():
 
 
 @app.route("/action/history")
-@require_admin_auth
 def action_history_page():
     return render_template_string(
         ACTION_TEMPLATE,
@@ -3218,7 +3222,6 @@ def api_actions():
 
 
 @app.route("/api/actions/history", methods=["GET"])
-@require_admin_auth
 def api_actions_history():
     try:
         limit = int(request.args.get("limit", "200"))
@@ -3233,7 +3236,6 @@ def api_actions_history():
 
 
 @app.route("/api/actions/history.xlsx", methods=["GET"])
-@require_admin_auth
 def api_actions_history_xlsx():
     try:
         events = [event for event in list_action_events(limit=200000, include_closed=True) if event.get("closed_at_utc")]
