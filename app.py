@@ -1895,7 +1895,7 @@ ACTION_TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Action Page</title>
+  <title>{{ page_title or 'Action Page' }}</title>
   <style>
     :root {
       --bg: #eef2ff;
@@ -2115,16 +2115,19 @@ ACTION_TEMPLATE = """
   <div class="wrap">
     <div class="top">
       <div class="top-line">
-        <h1>Action Page</h1>
+        <h1>{{ page_heading or 'Action Page' }}</h1>
+        {% if history_only %}
         <div class="mode-switch">
-          <button id="mode-active" class="mode-btn active" type="button">Active</button>
-          <button id="mode-history" class="mode-btn" type="button">History</button>
-          <span id="history-tools" class="history-tools">
-            <a class="download-btn" href="/api/actions/history.xlsx">Download Excel</a>
-          </span>
+          <a class="download-btn" href="/action">Back to Action</a>
+          <a class="download-btn" href="/api/actions/history.xlsx">Download Excel</a>
         </div>
+        {% endif %}
       </div>
+      {% if history_only %}
+      <div class="muted">Closed and wrong-sequence records.</div>
+      {% else %}
       <div class="muted">Cards appear only when all door QR codes for a gate are scanned.</div>
+      {% endif %}
       <div id="status" class="status">Refreshing...</div>
     </div>
     <div id="empty" class="empty">No active gate yet.</div>
@@ -2159,7 +2162,8 @@ ACTION_TEMPLATE = """
     const historyTools = document.getElementById('history-tools');
     const historyTableWrap = document.getElementById('history-table-wrap');
     const historyRows = document.getElementById('history-rows');
-    let showHistory = false;
+    const HISTORY_ONLY = {{ 'true' if history_only else 'false' }};
+    let showHistory = HISTORY_ONLY;
 
     function esc(text) {
       return String(text || '')
@@ -2301,7 +2305,7 @@ ACTION_TEMPLATE = """
 
     async function refreshActions() {
       try {
-        const query = showHistory ? '/api/actions?limit=120&include_closed=1' : '/api/actions?limit=80';
+        const query = showHistory ? '/api/actions/history?limit=120' : '/api/actions?limit=80';
         const res = await fetch(query);
         if (!res.ok) {
           statusBox.textContent = `Failed to refresh (${res.status})`;
@@ -2327,9 +2331,15 @@ ACTION_TEMPLATE = """
 
     function setMode(historyMode) {
       showHistory = Boolean(historyMode);
-      activeModeButton.classList.toggle('active', !showHistory);
-      historyModeButton.classList.toggle('active', showHistory);
-      historyTools.classList.toggle('show', showHistory);
+      if (activeModeButton) {
+        activeModeButton.classList.toggle('active', !showHistory);
+      }
+      if (historyModeButton) {
+        historyModeButton.classList.toggle('active', showHistory);
+      }
+      if (historyTools) {
+        historyTools.classList.toggle('show', showHistory);
+      }
       cardsBox.style.display = showHistory ? 'none' : 'grid';
       historyTableWrap.classList.toggle('show', showHistory);
       refreshActions();
@@ -2347,8 +2357,12 @@ ACTION_TEMPLATE = """
       await closeEvent(actionId, button);
     });
 
-    activeModeButton.addEventListener('click', () => setMode(false));
-    historyModeButton.addEventListener('click', () => setMode(true));
+    if (!HISTORY_ONLY && activeModeButton && historyModeButton) {
+      activeModeButton.addEventListener('click', () => setMode(false));
+      historyModeButton.addEventListener('click', () => setMode(true));
+    }
+    cardsBox.style.display = HISTORY_ONLY ? 'none' : 'grid';
+    historyTableWrap.classList.toggle('show', HISTORY_ONLY);
     refreshActions();
     setInterval(refreshActions, 2000);
   </script>
@@ -3126,7 +3140,18 @@ def office():
 
 @app.route("/action")
 def action_page():
-    return render_template_string(ACTION_TEMPLATE)
+    return render_template_string(ACTION_TEMPLATE, history_only=False, page_title="Action Page", page_heading="Action Page")
+
+
+@app.route("/action/history")
+@require_admin_auth
+def action_history_page():
+    return render_template_string(
+        ACTION_TEMPLATE,
+        history_only=True,
+        page_title="Action History",
+        page_heading="Action History",
+    )
 
 
 @app.route("/office/gates")
@@ -3186,14 +3211,29 @@ def api_actions():
     except ValueError:
         limit = 200
     limit = max(1, min(limit, 5000))
-    include_closed = str(request.args.get("include_closed", "")).strip().lower() in {"1", "true", "yes"}
     try:
-        return jsonify(list_action_events(limit=limit, include_closed=include_closed))
+        return jsonify(list_action_events(limit=limit, include_closed=False))
+    except sqlite3.Error as exc:
+        return jsonify({"error": f"database error: {exc}"}), 500
+
+
+@app.route("/api/actions/history", methods=["GET"])
+@require_admin_auth
+def api_actions_history():
+    try:
+        limit = int(request.args.get("limit", "200"))
+    except ValueError:
+        limit = 200
+    limit = max(1, min(limit, 5000))
+    try:
+        events = [event for event in list_action_events(limit=limit, include_closed=True) if event.get("closed_at_utc")]
+        return jsonify(events)
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
 
 
 @app.route("/api/actions/history.xlsx", methods=["GET"])
+@require_admin_auth
 def api_actions_history_xlsx():
     try:
         events = [event for event in list_action_events(limit=200000, include_closed=True) if event.get("closed_at_utc")]
