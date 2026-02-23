@@ -431,6 +431,10 @@ def init_db():
             connection.execute("ALTER TABLE action_events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'completed'")
         if not any(row["name"] == "event_note" for row in action_event_columns):
             connection.execute("ALTER TABLE action_events ADD COLUMN event_note TEXT")
+        if not any(row["name"] == "first_door_scan_at_utc" for row in action_event_columns):
+            connection.execute("ALTER TABLE action_events ADD COLUMN first_door_scan_at_utc TEXT")
+        if not any(row["name"] == "second_door_scan_at_utc" for row in action_event_columns):
+            connection.execute("ALTER TABLE action_events ADD COLUMN second_door_scan_at_utc TEXT")
         connection.commit()
 
 
@@ -571,6 +575,7 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
             expected_index = 1
         expected_door_no = int(required_doors[expected_index - 1]["door_no"])
         first_door_no = int(required_doors[0]["door_no"])
+        second_door_no = int(required_doors[1]["door_no"]) if required_count >= 2 else None
 
         if expected_door_no in matched_door_nos:
             connection.execute(
@@ -584,34 +589,65 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
             if expected_index >= required_count:
                 is_red_card = 0
                 door2_elapsed_seconds = None
-                if required_count == 2:
-                    first_scan_row = connection.execute(
-                        """
-                        SELECT last_scan_id
-                        FROM gate_cycle_door_state
-                        WHERE gate_id = ? AND door_no = ?
-                        """,
-                        (gate_id, first_door_no),
+                first_door_scan_at_utc = None
+                second_door_scan_at_utc = None
+                door_state_rows = connection.execute(
+                    """
+                    SELECT door_no, last_scan_id
+                    FROM gate_cycle_door_state
+                    WHERE gate_id = ? AND door_no IN (?, ?)
+                    """,
+                    (gate_id, first_door_no, second_door_no or first_door_no),
+                ).fetchall()
+                scan_ids_by_door = {int(row["door_no"]): int(row["last_scan_id"]) for row in door_state_rows}
+                first_scan_id = scan_ids_by_door.get(first_door_no)
+                second_scan_id = scan_ids_by_door.get(second_door_no) if second_door_no is not None else None
+                if first_scan_id:
+                    first_scan_at_row = connection.execute(
+                        "SELECT scanned_at_utc FROM scans WHERE id = ?",
+                        (first_scan_id,),
                     ).fetchone()
-                    if first_scan_row is not None:
-                        first_scan_at_row = connection.execute(
-                            "SELECT scanned_at_utc FROM scans WHERE id = ?",
-                            (int(first_scan_row["last_scan_id"]),),
-                        ).fetchone()
-                        first_dt = parse_utc_iso(first_scan_at_row["scanned_at_utc"]) if first_scan_at_row else None
-                        current_dt = parse_utc_iso(scanned_at_utc)
-                        if first_dt and current_dt:
-                            door2_elapsed_seconds = max(0, int((current_dt - first_dt).total_seconds()))
-                            if door2_elapsed_seconds > DOOR_2_TIMEOUT_SECONDS:
-                                is_red_card = 1
+                    if first_scan_at_row:
+                        first_door_scan_at_utc = first_scan_at_row["scanned_at_utc"]
+                if second_scan_id:
+                    second_scan_at_row = connection.execute(
+                        "SELECT scanned_at_utc FROM scans WHERE id = ?",
+                        (second_scan_id,),
+                    ).fetchone()
+                    if second_scan_at_row:
+                        second_door_scan_at_utc = second_scan_at_row["scanned_at_utc"]
+                if required_count == 2:
+                    first_dt = parse_utc_iso(first_door_scan_at_utc)
+                    current_dt = parse_utc_iso(scanned_at_utc)
+                    if first_dt and current_dt:
+                        door2_elapsed_seconds = max(0, int((current_dt - first_dt).total_seconds()))
+                        if door2_elapsed_seconds > DOOR_2_TIMEOUT_SECONDS:
+                            is_red_card = 1
+                    if second_door_scan_at_utc is None:
+                        second_door_scan_at_utc = scanned_at_utc
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO action_events(
-                        gate_id, completed_scan_id, completed_at_utc, is_red_card, door2_elapsed_seconds, event_type
+                        gate_id,
+                        completed_scan_id,
+                        completed_at_utc,
+                        is_red_card,
+                        door2_elapsed_seconds,
+                        event_type,
+                        first_door_scan_at_utc,
+                        second_door_scan_at_utc
                     )
-                    VALUES(?, ?, ?, ?, ?, 'completed')
+                    VALUES(?, ?, ?, ?, ?, 'completed', ?, ?)
                     """,
-                    (gate_id, scan_id, scanned_at_utc, is_red_card, door2_elapsed_seconds),
+                    (
+                        gate_id,
+                        scan_id,
+                        scanned_at_utc,
+                        is_red_card,
+                        door2_elapsed_seconds,
+                        first_door_scan_at_utc,
+                        second_door_scan_at_utc,
+                    ),
                 )
                 connection.execute(
                     """
@@ -841,6 +877,8 @@ def list_action_events(limit: int = 200, include_closed: bool = False):
                 e.door2_elapsed_seconds,
                 e.event_type,
                 e.event_note,
+                e.first_door_scan_at_utc,
+                e.second_door_scan_at_utc,
                 g.id AS gate_id,
                 g.gate_code
             FROM action_events e
@@ -880,6 +918,10 @@ def list_action_events(limit: int = 200, include_closed: bool = False):
                     "door2_elapsed_seconds": row["door2_elapsed_seconds"],
                     "event_type": (row["event_type"] or "completed"),
                     "event_note": row["event_note"],
+                    "first_door_scan_at_utc": row["first_door_scan_at_utc"],
+                    "first_door_scan_at_sgt": format_iso_utc_to_sgt(row["first_door_scan_at_utc"]),
+                    "second_door_scan_at_utc": row["second_door_scan_at_utc"],
+                    "second_door_scan_at_sgt": format_iso_utc_to_sgt(row["second_door_scan_at_utc"]),
                 }
             )
         return events
@@ -2018,6 +2060,8 @@ ACTION_TEMPLATE = """
             <th>Gate</th>
             <th>Doors</th>
             <th>Door Numbers</th>
+            <th>Door 1 Scan (SGT)</th>
+            <th>Door 2 Scan (SGT)</th>
             <th>Completed (SGT)</th>
             <th>Closed (SGT)</th>
             <th>Status</th>
@@ -2145,6 +2189,8 @@ ACTION_TEMPLATE = """
           <td class="mono">${esc(event.gate_code)}</td>
           <td>${esc(event.door_count)}</td>
           <td>${esc(doorNumbers || '-')}</td>
+          <td>${esc(event.first_door_scan_at_sgt || event.first_door_scan_at_utc || '-')}</td>
+          <td>${esc(event.second_door_scan_at_sgt || event.second_door_scan_at_utc || '-')}</td>
           <td>${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</td>
           <td>${esc(event.closed_at_sgt || event.closed_at_utc || '-')}</td>
           <td>${esc(statusText)}</td>
@@ -3016,6 +3062,8 @@ def api_actions_history_xlsx():
             "gate_code",
             "door_count",
             "door_numbers",
+            "door1_scan_at_sgt",
+            "door2_scan_at_sgt",
             "completed_at_sgt",
             "closed_at_sgt",
             "status",
@@ -3033,6 +3081,8 @@ def api_actions_history_xlsx():
                 event.get("gate_code"),
                 event.get("door_count"),
                 door_numbers,
+                event.get("first_door_scan_at_sgt") or event.get("first_door_scan_at_utc") or "",
+                event.get("second_door_scan_at_sgt") or event.get("second_door_scan_at_utc") or "",
                 event.get("completed_at_sgt") or event.get("completed_at_utc") or "",
                 event.get("closed_at_sgt") or event.get("closed_at_utc") or "",
                 (
