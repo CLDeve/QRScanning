@@ -9,8 +9,9 @@ import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from urllib.parse import urlencode
 
-from flask import Flask, Response, jsonify, redirect, render_template_string, request
+from flask import Flask, Response, jsonify, redirect, render_template_string, request, session
 
 
 def resolve_db_path() -> str:
@@ -31,6 +32,14 @@ DOOR_2_TIMEOUT_SECONDS = 20
 ADMIN_AUTH_REALM = os.environ.get("ADMIN_AUTH_REALM", "Gate Admin")
 
 app = Flask(__name__)
+app.config["SECRET_KEY"] = (
+    os.environ.get("FLASK_SECRET_KEY")
+    or os.environ.get("SECRET_KEY")
+    or "change-this-secret-key-in-render"
+)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("RENDER", "").strip().lower() == "true"
 
 
 def utc_now_iso() -> str:
@@ -60,6 +69,31 @@ def get_auth_config(scope: str = "admin"):
     return admin_user, admin_pass, realm
 
 
+def sanitize_next_path(value: str, default: str = "/office/gates") -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    if not raw.startswith("/") or raw.startswith("//"):
+        return default
+    return raw
+
+
+def is_admin_session_authenticated() -> bool:
+    return bool(session.get("admin_logged_in"))
+
+
+def set_admin_session_authenticated(username: str):
+    session["admin_logged_in"] = True
+    session["admin_username"] = str(username or "").strip()
+    session["admin_logged_in_at"] = utc_now_iso()
+
+
+def clear_admin_session():
+    session.pop("admin_logged_in", None)
+    session.pop("admin_username", None)
+    session.pop("admin_logged_in_at", None)
+
+
 def admin_auth_enabled(scope: str = "admin") -> bool:
     expected_user, expected_pass, _ = get_auth_config(scope)
     return bool(expected_user and expected_pass)
@@ -79,6 +113,16 @@ def _wrap_with_admin_auth(view_fn, scope: str):
     @wraps(view_fn)
     def wrapped(*args, **kwargs):
         if not admin_auth_enabled(scope):
+            return view_fn(*args, **kwargs)
+        if scope == "admin":
+            if not is_admin_session_authenticated():
+                next_path = request.full_path if request.query_string else request.path
+                if next_path.endswith("?"):
+                    next_path = next_path[:-1]
+                login_path = f"/admin/login?{urlencode({'next': next_path})}"
+                if request.path.startswith("/api/"):
+                    return jsonify({"error": "authentication required", "login_url": login_path}), 401
+                return redirect(login_path, code=302)
             return view_fn(*args, **kwargs)
         if not is_admin_authorized(scope):
             _, _, realm = get_auth_config(scope)
@@ -2634,11 +2678,157 @@ GATE_SETUP_TEMPLATE = """
 """
 
 
+ADMIN_LOGIN_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Login</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: rgba(15, 23, 42, 0.82);
+      --line: rgba(255, 255, 255, 0.14);
+      --ink: #f8fafc;
+      --muted: #cbd5e1;
+      --accent: #0f766e;
+      --danger: #fecaca;
+      --danger-ink: #7f1d1d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 20% 10%, rgba(16, 185, 129, 0.25), transparent 45%),
+        radial-gradient(circle at 90% 20%, rgba(59, 130, 246, 0.2), transparent 50%),
+        #020617;
+    }
+    .panel {
+      width: min(420px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--panel);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 20px 50px rgba(2, 6, 23, 0.45);
+      padding: 18px;
+    }
+    h1 { margin: 0 0 6px; font-size: 26px; }
+    .muted { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+    label {
+      display: block;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 6px;
+    }
+    input {
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 10px;
+      background: rgba(15, 23, 42, 0.75);
+      color: var(--ink);
+      padding: 10px 12px;
+      font-size: 15px;
+      margin-bottom: 12px;
+    }
+    .btn {
+      width: 100%;
+      border: 1px solid rgba(15, 118, 110, 0.9);
+      border-radius: 999px;
+      background: linear-gradient(180deg, rgba(15,118,110,0.95), rgba(13,148,136,0.95));
+      color: #fff;
+      padding: 10px 12px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .notice {
+      margin-bottom: 12px;
+      border-radius: 10px;
+      padding: 9px 10px;
+      font-size: 13px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.04);
+      color: var(--muted);
+    }
+    .notice.err {
+      background: #fee2e2;
+      color: var(--danger-ink);
+      border-color: #fecaca;
+    }
+  </style>
+</head>
+<body>
+  <form class="panel" method="post" action="/admin/login">
+    <h1>Admin Login</h1>
+    <div class="muted">Sign in to access Office and Gate Setup.</div>
+    {% if message %}
+      <div class="notice">{{ message }}</div>
+    {% endif %}
+    {% if error %}
+      <div class="notice err">{{ error }}</div>
+    {% endif %}
+    <input type="hidden" name="next" value="{{ next_path }}">
+    <label for="username">Username</label>
+    <input id="username" name="username" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required>
+    <button class="btn" type="submit">Sign In</button>
+  </form>
+</body>
+</html>
+"""
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    next_path = sanitize_next_path(request.values.get("next"), "/office/gates")
+    reason = str(request.values.get("reason", "")).strip().lower()
+    if not admin_auth_enabled("admin"):
+        return redirect(next_path, code=302)
+
+    if request.method == "GET" and is_admin_session_authenticated():
+        return redirect(next_path, code=302)
+
+    error = ""
+    if request.method == "POST":
+        username = str(request.form.get("username", "")).strip()
+        password = request.form.get("password", "") or ""
+        expected_user, expected_pass, _ = get_auth_config("admin")
+        if hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_pass):
+            set_admin_session_authenticated(username)
+            return redirect(next_path, code=302)
+        error = "Invalid username or password"
+
+    message = ""
+    if reason == "idle_timeout":
+        message = "Session timed out due to inactivity. Please sign in again."
+    elif reason in {"logout", "manual_button"}:
+        message = "Logged out."
+    return render_template_string(ADMIN_LOGIN_TEMPLATE, next_path=next_path, error=error, message=message)
+
+
 @app.route("/admin/logout")
 def admin_logout():
     scope = str(request.args.get("scope", "admin")).strip().lower()
     if scope not in {"admin", "action"}:
         scope = "admin"
+    if scope == "admin":
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        reason = str(request.args.get("reason", "logout")).strip() or "logout"
+        next_path = sanitize_next_path(request.args.get("next"), "/office/gates")
+        clear_admin_session()
+        query = urlencode({"next": next_path, "reason": reason, "t": stamp})
+        return redirect(f"/admin/login?{query}", code=302)
+
     _, _, realm = get_auth_config(scope)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     reason = str(request.args.get("reason", "logout")).strip() or "logout"
