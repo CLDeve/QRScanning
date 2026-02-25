@@ -2221,10 +2221,10 @@ ACTION_TEMPLATE = """
             <th>Gate</th>
             <th>Doors</th>
             <th>Door Numbers</th>
-            <th>Door 1 Scan (SGT)</th>
-            <th>Door 2 Scan (SGT)</th>
-            <th>Completed (SGT)</th>
-            <th>Closed (SGT)</th>
+            <th>Door 1 Scan</th>
+            <th>Door 2 Scan</th>
+            <th>Completed</th>
+            <th>Closed</th>
             <th>Status</th>
             <th>Remark</th>
             <th>Door 2 Time (s)</th>
@@ -2254,6 +2254,11 @@ ACTION_TEMPLATE = """
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }
+
+    function stripSgtLabel(value) {
+      const text = String(value || '');
+      return text.endsWith(' SGT') ? text.slice(0, -4) : text;
     }
 
     function formatSgtDateTimeFromDate(value) {
@@ -2351,10 +2356,10 @@ ACTION_TEMPLATE = """
           <td class="mono">${esc(event.gate_code)}</td>
           <td>${esc(event.door_count)}</td>
           <td>${esc(doorNumbers || '-')}</td>
-          <td>${esc(event.first_door_scan_at_sgt || event.first_door_scan_at_utc || '-')}</td>
-          <td>${esc(event.second_door_scan_at_sgt || event.second_door_scan_at_utc || '-')}</td>
-          <td>${esc(event.completed_at_sgt || event.completed_at_utc || '-')}</td>
-          <td>${esc(event.closed_at_sgt || event.closed_at_utc || '-')}</td>
+          <td>${esc(stripSgtLabel(event.first_door_scan_at_sgt || event.first_door_scan_at_utc || '-'))}</td>
+          <td>${esc(stripSgtLabel(event.second_door_scan_at_sgt || event.second_door_scan_at_utc || '-'))}</td>
+          <td>${esc(stripSgtLabel(event.completed_at_sgt || event.completed_at_utc || '-'))}</td>
+          <td>${esc(stripSgtLabel(event.closed_at_sgt || event.closed_at_utc || '-'))}</td>
           <td>${esc(statusText)}</td>
           <td>${esc(eventNote || '-')}</td>
           <td>${esc(elapsed)}</td>
