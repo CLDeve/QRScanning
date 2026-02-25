@@ -59,6 +59,14 @@ def parse_utc_iso(value: str):
         return None
 
 
+def compute_door2_elapsed_seconds(first_scan_at_utc: str, second_scan_at_utc: str):
+    first_dt = parse_utc_iso(first_scan_at_utc)
+    second_dt = parse_utc_iso(second_scan_at_utc)
+    if not first_dt or not second_dt:
+        return None
+    return max(0, int((second_dt - first_dt).total_seconds()))
+
+
 def get_auth_config(scope: str = "admin"):
     if scope == "action":
         action_user = os.environ.get("ACTION_ADMIN_USERNAME", "").strip()
@@ -648,14 +656,17 @@ def process_scan_for_actions(connection, scanned_qr: str, scan_id: int, scanned_
                     if second_scan_at_row:
                         second_door_scan_at_utc = second_scan_at_row["scanned_at_utc"]
                 if required_count == 2:
-                    first_dt = parse_utc_iso(first_door_scan_at_utc)
-                    current_dt = parse_utc_iso(scanned_at_utc)
-                    if first_dt and current_dt:
-                        door2_elapsed_seconds = max(0, int((current_dt - first_dt).total_seconds()))
-                        if door2_elapsed_seconds > DOOR_2_TIMEOUT_SECONDS:
-                            is_red_card = 1
                     if second_door_scan_at_utc is None:
                         second_door_scan_at_utc = scanned_at_utc
+                    door2_elapsed_seconds = compute_door2_elapsed_seconds(
+                        first_door_scan_at_utc,
+                        second_door_scan_at_utc,
+                    )
+                    if (
+                        door2_elapsed_seconds is not None
+                        and door2_elapsed_seconds > DOOR_2_TIMEOUT_SECONDS
+                    ):
+                        is_red_card = 1
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO action_events(
@@ -1033,6 +1044,13 @@ def list_action_events(limit: int = 200, include_closed: bool = False):
                 (row["gate_id"],),
             ).fetchall()
             doors = [dict(door) for door in door_rows]
+            door2_elapsed_seconds = row["door2_elapsed_seconds"]
+            recalculated_elapsed = compute_door2_elapsed_seconds(
+                row["first_door_scan_at_utc"],
+                row["second_door_scan_at_utc"],
+            )
+            if recalculated_elapsed is not None:
+                door2_elapsed_seconds = recalculated_elapsed
             events.append(
                 {
                     "id": row["id"],
@@ -1046,7 +1064,7 @@ def list_action_events(limit: int = 200, include_closed: bool = False):
                     "closed_at_sgt": format_iso_utc_to_sgt(row["closed_at_utc"]),
                     "completed_scan_id": row["completed_scan_id"],
                     "is_red_card": bool(row["is_red_card"]),
-                    "door2_elapsed_seconds": row["door2_elapsed_seconds"],
+                    "door2_elapsed_seconds": door2_elapsed_seconds,
                     "event_type": (row["event_type"] or "completed"),
                     "event_note": row["event_note"],
                     "first_door_scan_at_utc": row["first_door_scan_at_utc"],
