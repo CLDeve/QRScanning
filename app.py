@@ -2227,7 +2227,6 @@ ACTION_TEMPLATE = """
             <th>Closed</th>
             <th>Status</th>
             <th>Remark</th>
-            <th>Door 2 Time (s)</th>
           </tr>
         </thead>
         <tbody id="history-rows"></tbody>
@@ -2343,8 +2342,6 @@ ACTION_TEMPLATE = """
         const isRed = Boolean(event.is_red_card);
         const eventType = String(event.event_type || 'completed');
         const eventNote = String(event.event_note || '').trim();
-        const elapsedRaw = event.door2_elapsed_seconds;
-        const elapsed = elapsedRaw === null || elapsedRaw === undefined || elapsedRaw === '' ? '-' : Number(elapsedRaw);
         let statusText = 'Completed';
         if (eventType === 'wrong_sequence') {
           statusText = 'Wrong Sequence';
@@ -2362,7 +2359,6 @@ ACTION_TEMPLATE = """
           <td>${esc(stripSgtLabel(event.closed_at_sgt || event.closed_at_utc || '-'))}</td>
           <td>${esc(statusText)}</td>
           <td>${esc(eventNote || '-')}</td>
-          <td>${esc(elapsed)}</td>
         `;
         historyRows.appendChild(tr);
       });
@@ -3313,7 +3309,13 @@ def api_actions_history():
         limit = 200
     limit = max(1, min(limit, 5000))
     try:
-        events = [event for event in list_action_events(limit=limit, include_closed=True) if event.get("closed_at_utc")]
+        events = []
+        for event in list_action_events(limit=limit, include_closed=True):
+            if not event.get("closed_at_utc"):
+                continue
+            history_event = dict(event)
+            history_event.pop("door2_elapsed_seconds", None)
+            events.append(history_event)
         return jsonify(events)
     except sqlite3.Error as exc:
         return jsonify({"error": f"database error: {exc}"}), 500
@@ -3346,7 +3348,6 @@ def api_actions_history_xlsx():
             "closed_at_sgt",
             "status",
             "remark",
-            "door2_elapsed_seconds",
         ]
     )
 
@@ -3369,7 +3370,6 @@ def api_actions_history_xlsx():
                     else ("Timeout (Red)" if event.get("is_red_card") else "Completed")
                 ),
                 event.get("event_note") or "",
-                event.get("door2_elapsed_seconds"),
             ]
         )
 
